@@ -1,1 +1,1 @@
-# SamHack-Patiala-Baabes
+# PrismHack-Patiala-Baabes
