@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Calo</string>
+    <string name="accessibility_service_description">Lets Calo learn a flow from one voice+tap demo and replay it later on your command. Never acts on password, OTP, or payment screens.</string>
+</resources>

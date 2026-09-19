@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  canRetrieveWindowContent is the one that matters most: without it,
+  CaloAccessibilityService.rootInActiveWindow returns null and neither
+  teaching nor replay can see any UI at all.
+
+  We do NOT set canPerformGestures="true" — everything we do (CLICK,
+  SET_TEXT, SCROLL) is a node-level AccessibilityAction, not a raw
+  gesture, so we deliberately keep the permission surface smaller.
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeAllMask"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagRetrieveInteractiveWindows|flagReportViewIds"
+    android:canRetrieveWindowContent="true"
+    android:canRequestFilterKeyEvents="false"
+    android:notificationTimeout="100"
+    android:description="@string/accessibility_service_description" />
