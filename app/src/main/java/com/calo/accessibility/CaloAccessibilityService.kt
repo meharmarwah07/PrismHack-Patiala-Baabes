@@ -1,25 +1,11 @@
-package com.calo.accessibility
+﻿package com.calo.accessibility
 
 import android.accessibilityservice.AccessibilityService
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import com.calo.orchestrator.CaloOrchestrator
 import com.calo.teach.TeachRecorder
 
-/**
- * The one AccessibilityService the whole app runs on. Deliberately kept
- * thin — it just tracks mode (idle/teaching/replaying) and forwards raw
- * events to whichever component owns that mode. Teaching logic lives in
- * TeachRecorder, replay logic in ReplayEngine, gate logic in
- * CredentialGate: this class wires them to the Android lifecycle and
- * nothing else.
- *
- * `instance` exists because other components (the orchestrator, the
- * teach-mode UI) run outside this service's lifecycle and have no other
- * way to get a handle to the running service — this is the standard
- * pattern for a singleton AccessibilityService. It's set null in
- * onDestroy() specifically so nothing holds a stale reference to a torn-
- * down service (accessing rootInActiveWindow on a dead service throws).
- */
 class CaloAccessibilityService : AccessibilityService() {
 
     enum class Mode { IDLE, TEACHING, REPLAYING }
@@ -34,12 +20,19 @@ class CaloAccessibilityService : AccessibilityService() {
 
     private var teachRecorder: TeachRecorder? = null
 
+    lateinit var orchestrator: CaloOrchestrator
+        private set
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
+        orchestrator = CaloOrchestrator(applicationContext)
     }
 
     override fun onDestroy() {
+        if (::orchestrator.isInitialized) {
+            orchestrator.shutdown()
+        }
         instance = null
         super.onDestroy()
     }
@@ -49,14 +42,9 @@ class CaloAccessibilityService : AccessibilityService() {
         if (mode == Mode.TEACHING) {
             teachRecorder?.onAccessibilityEvent(event, currentRoot())
         }
-        // REPLAYING intentionally ignores incoming events — ReplayEngine
-        // drives itself step-by-step and re-reads currentRoot() on its own
-        // schedule; reacting to every event here would double-drive it.
     }
 
     override fun onInterrupt() {
-        // Required override; nothing to clean up — we hold no OS resources
-        // beyond node references, which are scoped to each walk/replay call.
     }
 
     fun startTeaching(): TeachRecorder {
@@ -66,7 +54,6 @@ class CaloAccessibilityService : AccessibilityService() {
         return recorder
     }
 
-    /** Returns the recorder holding everything captured since startTeaching(), and resets to IDLE. */
     fun stopTeaching(): TeachRecorder? {
         val recorder = teachRecorder
         teachRecorder = null

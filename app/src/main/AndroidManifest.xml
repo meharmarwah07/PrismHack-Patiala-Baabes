@@ -1,34 +1,16 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Voice trigger (SpeechRecognizer) -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
-    <!-- Groq API call from NLUClient -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    <!-- AccessibilityService needs this to keep running/foreground-aware -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
 
-    <!--
-      No custom icon/theme resources declared here on purpose — this build
-      pass is logic only (accessibility/replay/NLU/storage), not UI. Using
-      the platform's default theme so the manifest is valid without any
-      res/ design work; swap in a real launcher icon + theme when the UI
-      pass happens.
-    -->
     <application
         android:allowBackup="false"
         android:label="Calo"
         android:theme="@android:style/Theme.DeviceDefault.Light">
 
-        <!--
-          The core of the app. minSdk 26 is set in build.gradle because we
-          rely on AccessibilityNodeInfo.getWindowId()/isVisibleToUser() being
-          reliable from API 26+; we do NOT declare canPerformGestures — we
-          only ever need ACTION_CLICK / ACTION_SET_TEXT / ACTION_SCROLL_*,
-          which are node actions, not raw gesture dispatch, so we don't need
-          the higher API 28 GestureDescription path.
-        -->
         <service
             android:name=".accessibility.CaloAccessibilityService"
             android:exported="false"
@@ -41,6 +23,16 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/accessibility_service_config" />
         </service>
+
+        <receiver
+            android:name=".debug.DebugTriggerReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.calo.debug.START_TEACHING" />
+                <action android:name="com.calo.debug.FINISH_TEACHING" />
+                <action android:name="com.calo.debug.REPLAY_LATEST" />
+            </intent-filter>
+        </receiver>
 
     </application>
 
