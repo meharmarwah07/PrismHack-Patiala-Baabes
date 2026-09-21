@@ -6,6 +6,13 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
 
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
+
     <application
         android:allowBackup="false"
         android:label="Calo"
@@ -31,6 +38,7 @@
                 <action android:name="com.calo.debug.START_TEACHING" />
                 <action android:name="com.calo.debug.FINISH_TEACHING" />
                 <action android:name="com.calo.debug.REPLAY_LATEST" />
+                <action android:name="com.calo.debug.VOICE_COMMAND" />
             </intent-filter>
         </receiver>
 

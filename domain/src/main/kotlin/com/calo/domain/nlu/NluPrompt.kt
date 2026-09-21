@@ -1,4 +1,4 @@
-package com.calo.domain.nlu
+﻿package com.calo.domain.nlu
 
 /**
  * Builds the single LLM call this app makes for utterance-matching +
@@ -14,11 +14,16 @@ object NluPrompt {
      * taught utterance for each candidate, not a fixed grammar, and ask it
      * to judge semantic match — that's the whole point of using an LLM
      * call here instead of exact/fuzzy string matching.
+     *
+     * Candidates span EVERY app the user has taught a flow in, not just
+     * whatever's on screen right now — CaloOrchestrator resolves which app
+     * to launch from the matched flow's own stored targetPackage, so the
+     * LLM's only job is picking the right flow by meaning.
      */
     fun build(utterance: String, candidates: List<CandidateFlow>): String {
         if (candidates.isEmpty()) {
             // Still produce a well-formed prompt; the LLM should just report no match.
-            return buildPrompt(utterance, "(no flows have been taught for this app yet)")
+            return buildPrompt(utterance, "(no flows have been taught yet)")
         }
         val candidatesBlock = candidates.joinToString("\n") { c ->
             val slots = if (c.slotNames.isEmpty()) "none" else c.slotNames.joinToString(", ")
@@ -32,7 +37,7 @@ You match a spoken command to one previously-taught automation flow, or decide n
 
 Spoken command: "$utterance"
 
-Candidate flows for the app currently on screen:
+Candidate flows the user has previously taught (any app):
 $candidatesBlock
 
 Rules:

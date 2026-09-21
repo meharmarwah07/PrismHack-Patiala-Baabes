@@ -26,14 +26,14 @@ class TeachRecorder {
     fun onAccessibilityEvent(event: AccessibilityEvent, currentRoot: AccessibilityNodeInfo?) {
         val source = event.source ?: return
         try {
-            if (targetPackage == null) {
-                targetPackage = event.packageName?.toString()
-            }
             when (event.eventType) {
-                AccessibilityEvent.TYPE_VIEW_CLICKED ->
+                AccessibilityEvent.TYPE_VIEW_CLICKED -> {
+                    if (targetPackage == null) targetPackage = event.packageName?.toString()
                     steps += FlowStep(order = nextOrder++, action = ActionType.CLICK, target = anchorFor(source))
+                }
 
                 AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> {
+                    if (targetPackage == null) targetPackage = event.packageName?.toString()
                     val typed = event.text?.joinToString(separator = "") ?: ""
                     steps += FlowStep(
                         order = nextOrder++,
@@ -43,8 +43,10 @@ class TeachRecorder {
                     )
                 }
 
-                AccessibilityEvent.TYPE_VIEW_SCROLLED ->
+                AccessibilityEvent.TYPE_VIEW_SCROLLED -> {
+                    if (targetPackage == null) targetPackage = event.packageName?.toString()
                     steps += FlowStep(order = nextOrder++, action = ActionType.SCROLL, target = anchorFor(source))
+                }
 
                 else -> Unit // TYPE_WINDOW_STATE_CHANGED etc. — not a recordable user action
             }

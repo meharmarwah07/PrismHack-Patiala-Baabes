@@ -46,7 +46,7 @@ class NLUClient(
         .build()
 ) {
     companion object {
-        const val DEFAULT_MODEL = "llama-3.1-8b-instant"
+        const val DEFAULT_MODEL = "openai/gpt-oss-20b"
         private const val ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
         private val JSON_MEDIA_TYPE = "application/json".toMediaType()
     }

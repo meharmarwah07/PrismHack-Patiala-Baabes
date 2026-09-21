@@ -13,6 +13,7 @@ class DebugTriggerReceiver : BroadcastReceiver() {
         const val ACTION_START_TEACHING = "com.calo.debug.START_TEACHING"
         const val ACTION_FINISH_TEACHING = "com.calo.debug.FINISH_TEACHING"
         const val ACTION_REPLAY_LATEST = "com.calo.debug.REPLAY_LATEST"
+        const val ACTION_VOICE_COMMAND = "com.calo.debug.VOICE_COMMAND"
     }
 
     override fun onReceive(context: Context, intent: Intent) {
@@ -39,6 +40,18 @@ class DebugTriggerReceiver : BroadcastReceiver() {
             ACTION_REPLAY_LATEST -> {
                 service.orchestrator.replayLatestFlowForForegroundApp { status ->
                     Log.i(TAG, "Replay result: $status")
+                }
+            }
+
+            ACTION_VOICE_COMMAND -> {
+                val utterance = intent.getStringExtra("utterance")
+                if (utterance.isNullOrBlank()) {
+                    Log.w(TAG, "VOICE_COMMAND ignored: no --es utterance given.")
+                    return
+                }
+                Log.i(TAG, "Simulating voice command (debug, real Groq call): \"$utterance\"")
+                service.orchestrator.handleUtterance(utterance) { status ->
+                    Log.i(TAG, "Voice command result: $status")
                 }
             }
 
