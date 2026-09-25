@@ -6,6 +6,8 @@ import com.calo.accessibility.CaloAccessibilityService
 import com.calo.data.FlowRepository
 import com.calo.data.LearnedFlow
 import com.calo.domain.nlu.CandidateFlow
+import com.calo.domain.nlu.MatchResult
+import com.calo.domain.nlu.MatchStatus
 import com.calo.domain.replay.ReplayResult
 import com.calo.nlu.NLUClient
 import com.calo.replay.ReplayEngine
@@ -69,32 +71,148 @@ class CaloOrchestrator(context: Context) {
                     id = flow.id,
                     triggerUtterance = flow.triggerUtterance,
                     description = flow.description,
-                    slotNames = flow.slots.map { it.name }
+                    slotNames = flow.slots.map { it.name },
+                    slotExampleValues = flow.slots.associate { it.name to it.exampleValue }
                 )
             }
 
             val match = nluClient.match(utterance, candidates)
+
+            // Every non-MATCHED status must dead-end here — replay never starts on
+            // an NLU error (T0), an unrecognized command (T12), or an unresolved
+            // ambiguity (T13). Only the MATCHED branch below reaches replay.
+            when (match.status) {
+                MatchStatus.ERROR -> {
+                    onStatus(NLUClient.ERROR_MESSAGE)
+                    return@launch
+                }
+                MatchStatus.NO_MATCH -> {
+                    onStatus("I don't know how to do that yet. Want to teach me?")
+                    return@launch
+                }
+                MatchStatus.AMBIGUOUS -> {
+                    resolveAmbiguity(service, match, flows, onStatus)
+                    return@launch
+                }
+                MatchStatus.NEEDS_SLOT, MatchStatus.MATCHED -> Unit // handled below
+            }
+
             val matchedFlow = flows.find { it.id == match.matchedFlowId }
             if (matchedFlow == null) {
+                // Defensive only: MATCHED with an id NluResponseParser's caller
+                // didn't recognize against its own candidate list shouldn't happen,
+                // since matchedFlowId came from that same candidate list -- but
+                // this is exactly the "malformed reply" case the parser's doc warns
+                // about, so it gets the same "don't replay" treatment as NO_MATCH.
                 onStatus("Didn't recognize \"$utterance\" as any learned flow.")
                 return@launch
             }
 
-            val targetPackage = matchedFlow.targetPackage
-            if (service.currentPackageName() != targetPackage) {
-                onStatus("Opening $targetPackage...")
-                val arrived = launchAndWaitForForeground(service, targetPackage)
-                if (!arrived) {
-                    onStatus("Couldn't bring $targetPackage to the foreground — is it installed?")
-                    return@launch
-                }
+            // T14 (bonus): a slot the flow declares but the command never mentioned
+            // (so the LLM correctly omitted it per NluPrompt's rule) gets asked about
+            // explicitly instead of silently falling back to the taught value --
+            // scoped to right here, before replay starts; SlotResolver's own
+            // taught-value fallback (domain/slots) is untouched.
+            val matchedCandidate = candidates.find { it.id == matchedFlow.id }
+            val missingSlot = matchedCandidate?.slotNames?.firstOrNull { it !in match.slotValues.keys }
+            if (missingSlot != null) {
+                askForMissingSlot(service, matchedFlow, missingSlot, match.slotValues, onStatus)
+                return@launch
             }
 
-            onStatus("Replaying: ${matchedFlow.description}")
-            val engine = ReplayEngine(service)
-            val result = engine.replay(matchedFlow.steps, match.slotValues)
-            onStatus(describeResult(result))
+            launchAndReplay(service, matchedFlow, match.slotValues, onStatus)
         }
+    }
+
+    private fun askForMissingSlot(
+        service: CaloAccessibilityService,
+        flow: LearnedFlow,
+        slotName: String,
+        knownSlotValues: Map<String, String>,
+        onStatus: (String) -> Unit
+    ) {
+        onStatus("Which $slotName?")
+        voice.startListening(
+            onResult = { answer ->
+                scope.launch {
+                    launchAndReplay(service, flow, knownSlotValues + (slotName to answer), onStatus)
+                }
+            },
+            onFailure = { reason -> onStatus("Didn't catch that: $reason") }
+        )
+    }
+
+    /**
+     * Speaks the ambiguous options (via onStatus, same channel used for every
+     * other status message here — there's no TTS pipeline to hook into
+     * separately) and takes one more voice turn to resolve which flow was
+     * meant, then replays it directly (bypassing NLU matching a second time,
+     * since the user already disambiguated).
+     */
+    private fun resolveAmbiguity(
+        service: CaloAccessibilityService,
+        match: MatchResult,
+        flows: List<LearnedFlow>,
+        onStatus: (String) -> Unit
+    ) {
+        val options = match.alternatives.mapNotNull { alt -> flows.find { it.id == alt.flowId } }
+        if (options.size < 2) {
+            onStatus("That could match more than one learned flow, but I lost track of which — try again.")
+            return
+        }
+        onStatus("Did you mean " + options.joinToString(" or ") { "\"${it.description}\"" } + "?")
+
+        voice.startListening(
+            onResult = { answer -> handleAmbiguityAnswer(service, answer, options, onStatus) },
+            onFailure = { reason -> onStatus("Didn't catch that: $reason") }
+        )
+    }
+
+    private fun handleAmbiguityAnswer(
+        service: CaloAccessibilityService,
+        answer: String,
+        options: List<LearnedFlow>,
+        onStatus: (String) -> Unit
+    ) {
+        val lower = answer.lowercase()
+        val chosen = options.find { opt ->
+            lower.contains(opt.description.lowercase()) || lower.contains(opt.triggerUtterance.lowercase())
+        } ?: options.find { opt ->
+            // Loose fallback: any word of the description (>3 chars, so "the"/"app" don't
+            // false-positive) that the answer also says, e.g. "Domino's" out of "the Dominos one".
+            opt.description.lowercase().split(" ").any { word -> word.length > 3 && lower.contains(word) }
+        }
+
+        if (chosen == null) {
+            onStatus("Still not sure which one you meant — try naming the app directly.")
+            return
+        }
+
+        scope.launch {
+            launchAndReplay(service, chosen, emptyMap(), onStatus)
+        }
+    }
+
+    private suspend fun launchAndReplay(
+        service: CaloAccessibilityService,
+        flow: LearnedFlow,
+        slotValues: Map<String, String>,
+        onStatus: (String) -> Unit
+    ) {
+        val targetPackage = flow.targetPackage
+        if (service.currentPackageName() != targetPackage) {
+            onStatus("Opening $targetPackage...")
+            val arrived = launchAndWaitForForeground(service, targetPackage)
+            if (!arrived) {
+                onStatus("Couldn't bring $targetPackage to the foreground — is it installed?")
+                return
+            }
+        }
+
+        onStatus("Replaying: ${flow.description}")
+        val engine = ReplayEngine(service)
+        val result = engine.replay(flow.steps, slotValues)
+        onStatus(describeResult(result))
     }
 
     /**

@@ -3,6 +3,8 @@ package com.calo.nlu
 import com.calo.BuildConfig
 import com.calo.domain.nlu.CandidateFlow
 import com.calo.domain.nlu.MatchResult
+import com.calo.domain.nlu.MatchStatus
+import com.calo.domain.nlu.NluMatchEvaluator
 import com.calo.domain.nlu.NluPrompt
 import com.calo.domain.nlu.NluResponseParser
 import kotlinx.coroutines.Dispatchers
@@ -24,18 +26,16 @@ import java.util.concurrent.TimeUnit
 
 /**
  * The single LLM call the team decided on for utterance-matching +
- * slot-extraction (chosen over an embedding index). All prompt-building
- * and response-parsing logic lives in :domain (NluPrompt / NluResponseParser)
- * and is unit-tested there; this class is just the HTTP transport plus the
- * one piece that genuinely can't be unit-tested here — an actual network
- * call to Groq. NOT exercised against a live API key in this build pass;
- * see the README's unverified list.
+ * slot-extraction (chosen over an embedding index). All prompt-building,
+ * response-parsing, and threshold/ambiguity gating logic lives in :domain
+ * (NluPrompt / NluResponseParser / NluMatchEvaluator) and is unit-tested
+ * there; this class is just the HTTP transport plus the one piece that
+ * genuinely can't be unit-tested here — an actual network call to Groq.
  *
- * Model choice (as of Sep 2026, per console.groq.com/docs/models):
- * llama-3.1-8b-instant — fast/cheap, plenty for a short matching+extraction
- * prompt. Swap via GROQ_MODEL if the team wants the larger 70b model for
- * accuracy on trickier paraphrases; Groq's model lineup changes over time,
- * so re-check console.groq.com/docs/models before the demo.
+ * Verified live against the rotated GROQ_API_KEY on 2026-09-26 via
+ * NluLiveHarness (domain module, JVM-only, no device needed) — see the
+ * lane report for the confidence table MATCH_THRESHOLD/AMBIGUITY_MARGIN
+ * were derived from. Model is openai/gpt-oss-20b (DEFAULT_MODEL below).
  */
 class NLUClient(
     private val apiKey: String = BuildConfig.GROQ_API_KEY,
@@ -43,40 +43,50 @@ class NLUClient(
     private val client: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.SECONDS)
-        .build()
+        .build(),
+    // Overridable only so tests can point this at a MockWebServer instead of
+    // the real Groq endpoint; production code never passes this parameter.
+    private val endpoint: String = DEFAULT_ENDPOINT
 ) {
     companion object {
         const val DEFAULT_MODEL = "openai/gpt-oss-20b"
-        private const val ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
+        const val ERROR_MESSAGE = "Voice matching is unavailable right now"
+        const val DEFAULT_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
         private val JSON_MEDIA_TYPE = "application/json".toMediaType()
     }
 
     private val json = Json { ignoreUnknownKeys = true }
 
+    private fun errorResult(logReason: String, cause: Throwable? = null): MatchResult {
+        android.util.Log.e("NLUClient", "Groq call failed ($ERROR_MESSAGE): $logReason", cause)
+        return MatchResult(matchedFlowId = null, status = MatchStatus.ERROR)
+    }
+
     /**
-     * Returns a "no match" MatchResult (never throws to the caller) on any
-     * network/HTTP/parse failure — matches NluResponseParser's own
-     * fail-safe default, so the orchestrator has exactly one shape to
-     * handle: "didn't find a match" covers network errors, malformed
-     * replies, and genuine no-match alike. Callers that need to
-     * distinguish "Groq call failed" for logging/retry should catch
-     * IOException around this call instead of relying on the result shape.
+     * ERROR status (never a bare "no match") on a missing key, a failed
+     * HTTP call (401/429/5xx), or a network/timeout exception — T0's
+     * requirement that these look distinctly different from "the model
+     * looked and found nothing," both in the result shape and in
+     * whatever the orchestrator tells the user, and that replay never
+     * starts on any of them. A 200 response with unparseable content
+     * still collapses to NluResponseParser's safe no-match default
+     * (that's "couldn't understand," a model-quality issue, not a
+     * transport error) — see NluResponseParser's class doc. Threshold/
+     * ambiguity gating (T12/T13) is applied via NluMatchEvaluator only
+     * on the happy path, since an ERROR/no-match result has nothing to
+     * gate.
      */
     suspend fun match(utterance: String, candidates: List<CandidateFlow>): MatchResult =
         withContext(Dispatchers.IO) {
             if (apiKey.isBlank()) {
-                // Fails loudly in logs, quietly (no-match) to the caller —
-                // a missing key should never look like "the user said
-                // something unrecognized."
-                android.util.Log.e("NLUClient", "GROQ_API_KEY is not set; see app/build.gradle.kts")
-                return@withContext MatchResult(matchedFlowId = null)
+                return@withContext errorResult("GROQ_API_KEY is not set; see app/build.gradle.kts")
             }
 
             val prompt = NluPrompt.build(utterance, candidates)
             val requestBody = buildRequestBody(prompt)
 
             val request = Request.Builder()
-                .url(ENDPOINT)
+                .url(endpoint)
                 .header("Authorization", "Bearer $apiKey")
                 .post(requestBody.toString().toRequestBody(JSON_MEDIA_TYPE))
                 .build()
@@ -84,18 +94,23 @@ class NLUClient(
             val rawContent = try {
                 client.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) {
-                        android.util.Log.e("NLUClient", "Groq call failed: HTTP ${response.code}")
-                        return@withContext MatchResult(matchedFlowId = null)
+                        return@withContext errorResult("HTTP ${response.code}")
                     }
-                    val bodyString = response.body?.string() ?: return@withContext MatchResult(matchedFlowId = null)
+                    val bodyString = response.body?.string()
+                        ?: return@withContext errorResult("HTTP ${response.code} had no body")
                     extractMessageContent(bodyString)
                 }
             } catch (e: IOException) {
-                android.util.Log.e("NLUClient", "Groq call threw", e)
-                return@withContext MatchResult(matchedFlowId = null)
+                // Covers java.net.SocketTimeoutException (connect/read timeout) as well as
+                // any other transport failure -- all "Groq call didn't complete", not "no match".
+                return@withContext errorResult("network/timeout: ${e.javaClass.simpleName}", e)
             }
 
-            NluResponseParser.parse(rawContent ?: return@withContext MatchResult(matchedFlowId = null))
+            if (rawContent == null) {
+                return@withContext errorResult("Groq response body wasn't the expected shape")
+            }
+
+            NluMatchEvaluator.evaluate(NluResponseParser.parse(rawContent))
         }
 
     private fun buildRequestBody(prompt: String) = buildJsonObject {
