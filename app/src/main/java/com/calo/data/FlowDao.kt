@@ -22,4 +22,9 @@ interface FlowDao {
 
     @Delete
     suspend fun delete(flow: LearnedFlow)
+
+    // Debug-only reset path (see DebugResetReceiver, app/src/debug). Add a
+    // matching DELETE here for every table this @Database gains in future.
+    @Query("DELETE FROM learned_flows")
+    suspend fun deleteAll()
 }

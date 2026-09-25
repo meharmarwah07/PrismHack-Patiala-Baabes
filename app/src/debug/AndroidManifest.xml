@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Merged only into debug builds by AGP. This is what keeps DebugResetReceiver
+  (and the com.calo.DEBUG_RESET broadcast action) out of release entirely,
+  rather than relying on an exported="false" flag that a future edit could
+  accidentally flip.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <receiver
+            android:name=".debug.DebugResetReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.calo.DEBUG_RESET" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>
