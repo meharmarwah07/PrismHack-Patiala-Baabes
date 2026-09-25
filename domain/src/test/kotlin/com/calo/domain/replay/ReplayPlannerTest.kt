@@ -21,7 +21,13 @@ private class FakeNodeProvider(
     private val defaultSignals: ScreenSignals,
     private val missingAnchors: Set<String> = emptySet(),
     private val failingActions: Set<String> = emptySet(), // node ids that fail their action
-    private val availableOptions: Set<String> = emptySet() // text values findNodeByValue can find on screen
+    // Every label currently on screen, ONE ENTRY PER ELEMENT (duplicates
+    // allowed on purpose — two different rows can share a label, which is
+    // exactly the "two candidates" ambiguity case). findNodeByValue below
+    // routes through the REAL ClickValueMatcher, the same algorithm
+    // NodeWalker.findBySlotValue uses in :app, so this fake proves the
+    // production matching/ambiguity rules, not a hand-simplified stand-in.
+    private val availableOptions: List<String> = emptyList()
 ) : NodeProvider {
     private var callCount = 0
     val clickCalls = mutableListOf<String>()
@@ -41,8 +47,8 @@ private class FakeNodeProvider(
     }
 
     override fun findNodeByValue(value: String): NodeHandle? {
-        if (value !in availableOptions) return null
-        return FakeNode("option:$value")
+        val chosen = ClickValueMatcher.resolve(availableOptions, value) { it } ?: return null
+        return FakeNode("option:$chosen")
     }
 
     override fun performClick(node: NodeHandle): Boolean {
@@ -174,7 +180,7 @@ class ReplayPlannerTest {
         // back to re-resolving id/address_row (which would silently tap
         // whatever "Home" still resolves to — the exact bug being fixed).
         val steps = listOf(clickStepWithSlot(1, "id/address_row", recordedText = "Home", slotName = "address"))
-        val provider = FakeNodeProvider(emptyMap(), clearSignals, availableOptions = setOf("Work"))
+        val provider = FakeNodeProvider(emptyMap(), clearSignals, availableOptions = listOf("Work"))
         val result = ReplayPlanner.replay(steps, mapOf("address" to "Work"), provider)
 
         assertEquals(ReplayResult.Completed, result)
@@ -185,13 +191,60 @@ class ReplayPlannerTest {
     @Test
     fun `CLICK slot value with no matching option on screen is Stuck, never falls back to the wrong original tap`() {
         val steps = listOf(clickStepWithSlot(1, "id/address_row", recordedText = "Home", slotName = "address"))
-        val provider = FakeNodeProvider(emptyMap(), clearSignals, availableOptions = emptySet())
+        val provider = FakeNodeProvider(emptyMap(), clearSignals, availableOptions = emptyList())
         val result = ReplayPlanner.replay(steps, mapOf("address" to "Work"), provider)
 
         assertTrue(result is ReplayResult.Stuck)
         assertEquals(1, (result as ReplayResult.Stuck).atStepOrder)
         assertTrue(result.reason.contains("Work"))
         assertTrue(provider.clickCalls.isEmpty()) // no wrong tap attempted either
+    }
+
+    @Test
+    fun `CLICK item substitution -- two candidates on screen is Stuck, never guesses`() {
+        // Two distinct result rows both happen to be labeled "Farmhouse"
+        // (e.g. regular and stuffed-crust variants) — must never guess.
+        val steps = listOf(clickStepWithSlot(1, "id/item_search", recordedText = "Margherita", slotName = "item"))
+        val provider = FakeNodeProvider(emptyMap(), clearSignals, availableOptions = listOf("Farmhouse", "Farmhouse"))
+        val result = ReplayPlanner.replay(steps, mapOf("item" to "Farmhouse"), provider)
+
+        assertTrue(result is ReplayResult.Stuck)
+        assertEquals(1, (result as ReplayResult.Stuck).atStepOrder)
+        assertTrue(provider.clickCalls.isEmpty())
+    }
+
+    @Test
+    fun `CLICK item substitution -- case-insensitive, trimmed exact match`() {
+        val steps = listOf(clickStepWithSlot(1, "id/item_search", recordedText = "Margherita", slotName = "item"))
+        val provider = FakeNodeProvider(emptyMap(), clearSignals, availableOptions = listOf(" FARMHOUSE "))
+        val result = ReplayPlanner.replay(steps, mapOf("item" to "farmhouse"), provider)
+
+        assertEquals(ReplayResult.Completed, result)
+        assertEquals(listOf("option: FARMHOUSE "), provider.clickCalls)
+    }
+
+    @Test
+    fun `CLICK item substitution -- unique contains-match used only when exact match fails`() {
+        val steps = listOf(clickStepWithSlot(1, "id/item_search", recordedText = "Margherita", slotName = "item"))
+        val provider = FakeNodeProvider(emptyMap(), clearSignals, availableOptions = listOf("Farmhouse Deluxe"))
+        val result = ReplayPlanner.replay(steps, mapOf("item" to "Farmhouse"), provider)
+
+        assertEquals(ReplayResult.Completed, result)
+        assertEquals(listOf("option:Farmhouse Deluxe"), provider.clickCalls)
+    }
+
+    @Test
+    fun `CLICK item substitution -- ambiguous contains-match (two candidates) is Stuck`() {
+        val steps = listOf(clickStepWithSlot(1, "id/item_search", recordedText = "Margherita", slotName = "item"))
+        val provider = FakeNodeProvider(
+            emptyMap(), clearSignals,
+            availableOptions = listOf("Farmhouse Deluxe", "Farmhouse Feast")
+        )
+        val result = ReplayPlanner.replay(steps, mapOf("item" to "Farmhouse"), provider)
+
+        assertTrue(result is ReplayResult.Stuck)
+        assertEquals(1, (result as ReplayResult.Stuck).atStepOrder)
+        assertTrue(provider.clickCalls.isEmpty())
     }
 
     @Test
@@ -224,7 +277,7 @@ class ReplayPlannerTest {
             setTextStep(1, "id/item_search", "Margherita", slotName = "item"),
             clickStepWithSlot(2, "id/address_row", recordedText = "Home", slotName = "address")
         )
-        val provider = FakeNodeProvider(emptyMap(), clearSignals, availableOptions = setOf("Work"))
+        val provider = FakeNodeProvider(emptyMap(), clearSignals, availableOptions = listOf("Work"))
         val result = ReplayPlanner.replay(steps, mapOf("item" to "Pepperoni", "address" to "Work"), provider)
 
         assertEquals(ReplayResult.Completed, result)

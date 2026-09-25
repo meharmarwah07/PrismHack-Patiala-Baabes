@@ -35,7 +35,12 @@ object CredentialGateRules {
     private val PAYMENT_KEYWORDS = listOf(
         "card number", "cardnumber", "card_number", "cvv", "cvc",
         "expiry", "exp date", "expiration date", "billing address",
-        "upi pin", "bank account", "ifsc", "routing number", "swift code"
+        "upi pin", "bank account", "ifsc", "routing number", "swift code",
+        // Added for T11 (2026-09-26): checkout-flow wording confirmed missing
+        // from the original keyword set — "pay"/"upi" alone (not just "upi
+        // pin") are what real checkout screens (Zomato, Dominos) actually
+        // show on the final confirm-and-pay button/page.
+        "pay", "proceed to pay", "place order", "upi", "pay ₹", "total payable"
     )
     private val LOGIN_KEYWORDS = listOf(
         "sign in", "signin", "log in", "login", "authenticate",

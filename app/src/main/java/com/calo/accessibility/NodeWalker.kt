@@ -3,6 +3,7 @@ package com.calo.accessibility
 import android.graphics.Rect
 import android.view.accessibility.AccessibilityNodeInfo
 import com.calo.domain.model.ElementAnchor
+import com.calo.domain.replay.ClickValueMatcher
 import com.calo.domain.teach.BoundsAtPointResolver
 
 /**
@@ -104,6 +105,72 @@ class NodeWalker {
                 clickable.recycle()
             } else {
                 resolved += clickable
+            }
+        }
+        return resolved
+    }
+
+    /**
+     * Task 1 (Lane B, 2026-09-26): slot-substitution CLICK search for item
+     * replacement (e.g. taught tapping "Margherita" in a search-result
+     * list, replayed with "Farmhouse"). Deliberately a SEPARATE method from
+     * [findByValue] rather than a change to it: [findByValue] does an exact,
+     * first-in-traversal-order match, and TeachRecorder's own record-time
+     * disambiguation (see its class doc, `recordClickWithoutSource`) is
+     * built on that exact contract — changing it out from under Lane A's
+     * teach-time matching was exactly the kind of cross-lane collision this
+     * project's branch split is meant to avoid.
+     *
+     * This one instead collects EVERY distinct clickable element's label
+     * on screen and delegates the actual counting/uniqueness decision to
+     * [ClickValueMatcher] (:domain, unit-tested): case-insensitive+trimmed
+     * exact match first, a contains-match only when exact finds nothing and
+     * only when it narrows to exactly one candidate, Stuck (null) for
+     * anything else — see that object's doc for the full rule and
+     * ReplayPlannerTest for the sequencing-level proof that Stuck follows
+     * from a null result here rather than a silent wrong tap.
+     */
+    fun findBySlotValue(root: AccessibilityNodeInfo?, value: String): AccessibilityNodeInfo? {
+        if (root == null) return null
+        val labeled = collectLabeledClickables(root)
+        val chosen = ClickValueMatcher.resolve(labeled, value) { it.first }
+        for ((_, node) in labeled) if (node !== chosen?.second) node.recycle()
+        return chosen?.second
+    }
+
+    /**
+     * One (label, node) entry per distinct clickable ancestor under [root]
+     * (root included) — same dedup-by-clickable-ancestor rule [findAllByValue]
+     * uses, so a label living on a descendant TextView still surfaces as its
+     * containing row's actionable element. text is preferred over
+     * contentDescription as the label when a node has both (matching the
+     * priority order used everywhere else an anchor's label is chosen, e.g.
+     * SlotResolver.resolveClickTarget), so a node never contributes two
+     * separate "candidates" for what is really one tappable element.
+     */
+    private fun collectLabeledClickables(root: AccessibilityNodeInfo): List<Pair<String, AccessibilityNodeInfo>> {
+        val labeledDescendants = collectAll(root) { node ->
+            val text = node.text?.toString()
+            val cd = node.contentDescription?.toString()
+            !text.isNullOrBlank() || !cd.isNullOrBlank()
+        }
+
+        val resolved = mutableListOf<Pair<String, AccessibilityNodeInfo>>()
+        for (node in labeledDescendants) {
+            val label = node.text?.toString()?.takeIf { it.isNotBlank() }
+                ?: node.contentDescription?.toString()?.takeIf { it.isNotBlank() }
+            if (label == null) {
+                node.recycle() // predicate guaranteed non-blank; defensive only
+                continue
+            }
+            val clickable = nearestClickableAncestor(node)
+            val existing = resolved.indexOfFirst { it.second == clickable }
+            if (existing >= 0) {
+                // Two different labels under the same clickable row climbed
+                // to the same ancestor — keep the first, recycle the rest.
+                clickable.recycle()
+            } else {
+                resolved += label to clickable
             }
         }
         return resolved

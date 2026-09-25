@@ -1,0 +1,66 @@
+package com.calo.domain.replay
+
+import com.calo.domain.model.ElementAnchor
+import org.junit.Assert.assertEquals
+import org.junit.Test
+
+class StuckQuestionTest {
+
+    @Test
+    fun `uses text when present`() {
+        val anchor = ElementAnchor(resourceId = "id/search_result", text = "Margherita")
+        assertEquals(
+            "I couldn't find 'Margherita' on this screen. Should I pick something else, or stop?",
+            StuckQuestion.build(anchor, stepOrder = 2)
+        )
+    }
+
+    @Test
+    fun `falls back to contentDescription when text is absent`() {
+        val anchor = ElementAnchor(contentDescription = "Farmhouse pizza, 12 inch")
+        assertEquals(
+            "I couldn't find 'Farmhouse pizza, 12 inch' on this screen. Should I pick something else, or stop?",
+            StuckQuestion.build(anchor, stepOrder = 3)
+        )
+    }
+
+    @Test
+    fun `falls back to contentDescription when text is blank`() {
+        val anchor = ElementAnchor(text = "  ", contentDescription = "Confirm order")
+        assertEquals(
+            "I couldn't find 'Confirm order' on this screen. Should I pick something else, or stop?",
+            StuckQuestion.build(anchor, stepOrder = 5)
+        )
+    }
+
+    @Test
+    fun `falls back to the resourceId's last segment, underscores as spaces`() {
+        val anchor = ElementAnchor(resourceId = "com.dominos.app:id/search_button")
+        assertEquals(
+            "I couldn't find 'search button' on this screen. Should I pick something else, or stop?",
+            StuckQuestion.build(anchor, stepOrder = 1)
+        )
+    }
+
+    @Test
+    fun `falls back to a step-number description when nothing else was recorded`() {
+        val anchor = ElementAnchor(className = "android.widget.LinearLayout", indexInParent = 4)
+        assertEquals(
+            "I couldn't find the button I tapped at step 7 on this screen. Should I pick something else, or stop?",
+            StuckQuestion.build(anchor, stepOrder = 7)
+        )
+    }
+
+    @Test
+    fun `priority order -- text wins over contentDescription and resourceId`() {
+        val anchor = ElementAnchor(
+            resourceId = "id/row",
+            text = "Farmhouse",
+            contentDescription = "ignored content description"
+        )
+        assertEquals(
+            "I couldn't find 'Farmhouse' on this screen. Should I pick something else, or stop?",
+            StuckQuestion.build(anchor, stepOrder = 4)
+        )
+    }
+}

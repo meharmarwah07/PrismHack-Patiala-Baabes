@@ -40,14 +40,15 @@ private class AndroidNodeHandle(val node: AccessibilityNodeInfo) : NodeHandle
  *      CredentialGate's real node-tree-to-ScreenSignals extraction
  *      recognizes an actual payment screen's real AccessibilityNodeInfo
  *      tree the same way.
- *   3. findNodeByValue() / NodeWalker.findByValue() (added to fix a
- *      silent-wrong-tap bug: a CLICK step whose slot value differs from
- *      what was recorded now searches by the NEW text/contentDescription
- *      instead of re-tapping the taught anchor). ReplayPlannerTest proves
- *      the SEQUENCING decision — when to search by value vs. re-tap the
- *      anchor, and that a miss is Stuck, never a fallback tap — against a
- *      fake screen; it does not prove NodeWalker's real tree walk finds
- *      the right real AccessibilityNodeInfo by text/contentDescription.
+ *   3. findNodeByValue() / NodeWalker.findBySlotValue() (Task 1, Lane B: a
+ *      CLICK step whose slot value differs from what was recorded now
+ *      searches by the NEW text/contentDescription, case-insensitively and
+ *      trimmed, with a contains-fallback and ambiguity guard, instead of
+ *      re-tapping the taught anchor). ReplayPlannerTest and
+ *      ClickValueMatcherTest prove the SEQUENCING decision and the actual
+ *      matching/ambiguity algorithm respectively, both against fakes; it
+ *      does not prove NodeWalker's real tree walk finds the right real
+ *      AccessibilityNodeInfo by text/contentDescription.
  */
 class ReplayEngine(
     private val service: CaloAccessibilityService,
@@ -88,7 +89,7 @@ class ReplayEngine(
     }
 
     override fun findNodeByValue(value: String): NodeHandle? {
-        val node = nodeWalker.findByValue(service.currentRoot(), value) ?: return null
+        val node = nodeWalker.findBySlotValue(service.currentRoot(), value) ?: return null
         return AndroidNodeHandle(node)
     }
 

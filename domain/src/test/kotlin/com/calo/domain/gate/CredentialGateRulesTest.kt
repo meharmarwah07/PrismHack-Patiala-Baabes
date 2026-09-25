@@ -48,6 +48,38 @@ class CredentialGateRulesTest {
         assertTrue(verdict is GateVerdict.Blocked)
     }
 
+    // --- T11 checkout-wording keywords (2026-09-26) --------------------
+
+    @Test
+    fun `blocks on a bare Pay button`() {
+        assertTrue(CredentialGateRules.classify(clear("Pay", "₹450")) is GateVerdict.Blocked)
+    }
+
+    @Test
+    fun `blocks on Proceed to pay`() {
+        assertTrue(CredentialGateRules.classify(clear("Proceed to pay")) is GateVerdict.Blocked)
+    }
+
+    @Test
+    fun `blocks on Place order`() {
+        assertTrue(CredentialGateRules.classify(clear("Place order")) is GateVerdict.Blocked)
+    }
+
+    @Test
+    fun `blocks on UPI (not just UPI PIN)`() {
+        assertTrue(CredentialGateRules.classify(clear("Pay via UPI")) is GateVerdict.Blocked)
+    }
+
+    @Test
+    fun `blocks on a rupee-denominated pay amount`() {
+        assertTrue(CredentialGateRules.classify(clear("Pay ₹450")) is GateVerdict.Blocked)
+    }
+
+    @Test
+    fun `blocks on Total payable`() {
+        assertTrue(CredentialGateRules.classify(clear("Total payable: ₹450")) is GateVerdict.Blocked)
+    }
+
     @Test
     fun `blocks on generic login screen wording`() {
         val verdict = CredentialGateRules.classify(clear("Sign in to continue", "Forgot password?"))

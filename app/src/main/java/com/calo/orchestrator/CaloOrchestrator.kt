@@ -5,23 +5,31 @@ import android.content.Intent
 import com.calo.accessibility.CaloAccessibilityService
 import com.calo.data.FlowRepository
 import com.calo.data.LearnedFlow
+import com.calo.domain.model.ElementAnchor
 import com.calo.domain.model.FlowStep
 import com.calo.domain.model.SlotDefinition
 import com.calo.domain.nlu.CandidateFlow
 import com.calo.domain.replay.ReplayResult
+import com.calo.domain.replay.StuckAction
+import com.calo.domain.replay.StuckAnswerHandler
+import com.calo.domain.replay.StuckQuestion
 import com.calo.nlu.NLUClient
 import com.calo.replay.ReplayEngine
+import com.calo.voice.TextToSpeechManager
 import com.calo.voice.VoiceInputManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
 
 class CaloOrchestrator(context: Context) {
 
     private val appContext = context.applicationContext
     private val voice = VoiceInputManager(appContext)
+    private val tts = TextToSpeechManager(appContext)
     private val repository = FlowRepository(appContext)
     private val nluClient = NLUClient()
 
@@ -103,9 +111,71 @@ class CaloOrchestrator(context: Context) {
             onStatus("Replaying: ${matchedFlow.description}")
             val engine = ReplayEngine(service)
             val result = engine.replay(matchedFlow.steps, match.slotValues)
-            onStatus(describeResult(result))
+            handleReplayResult(engine, matchedFlow.steps, match.slotValues, result, onStatus)
         }
     }
+
+    /**
+     * Task 2 (Lane B): a Stuck result is never surfaced as a bare "Replay
+     * failed" — this builds a specific question (StuckQuestion, :domain),
+     * shows AND speaks it, then takes the answer by voice: "stop" (or a
+     * synonym) aborts cleanly, anything else recognized is retried as the
+     * new text/label to match for the exact step that got stuck (steps
+     * after it then continue normally). A voice-recognition failure or an
+     * empty utterance repeats the question once before giving up —
+     * StuckAnswerHandler (:domain, unit-tested) makes that decision; this
+     * function is just the Android-side glue (TTS + SpeechRecognizer)
+     * around it. Completed/Halted results are unaffected — Halted (the
+     * credential gate) is a final safety stop, never a question.
+     */
+    private suspend fun handleReplayResult(
+        engine: ReplayEngine,
+        steps: List<FlowStep>,
+        slotValues: Map<String, String>,
+        result: ReplayResult,
+        onStatus: (String) -> Unit,
+        attempt: Int = 1
+    ) {
+        if (result !is ReplayResult.Stuck) {
+            onStatus(describeResult(result))
+            return
+        }
+
+        val stuckStep = steps.find { it.order == result.atStepOrder }
+        val question = StuckQuestion.build(stuckStep?.target ?: ElementAnchor(), result.atStepOrder)
+        onStatus(question)
+        tts.speak(question)
+
+        val outcome = listenForStuckAnswer()
+        when (val action = StuckAnswerHandler.handle(outcome, attempt)) {
+            StuckAction.Stop -> onStatus("Stopped.")
+            StuckAction.Repeat -> handleReplayResult(engine, steps, slotValues, result, onStatus, attempt = attempt + 1)
+            is StuckAction.Retry -> {
+                val remaining = steps.filter { it.order >= result.atStepOrder }
+                val target = remaining.first()
+                // Steps not already carrying a slotName get a synthetic one
+                // just for this retry — forces the search-by-value path
+                // (SlotResolver.resolveClickTarget / resolveValue) even for
+                // a step that was taught as a plain literal.
+                val retrySlotName = target.slotName ?: "__stuck_retry_${target.order}"
+                val retryStep = if (target.slotName == null) target.copy(slotName = retrySlotName) else target
+                val retrySteps = listOf(retryStep) + remaining.drop(1)
+                val retrySlotValues = slotValues + (retrySlotName to action.newValue)
+
+                onStatus("Trying \"${action.newValue}\" instead...")
+                val retryResult = engine.replay(retrySteps, retrySlotValues)
+                handleReplayResult(engine, retrySteps, retrySlotValues, retryResult, onStatus, attempt = 1)
+            }
+        }
+    }
+
+    private suspend fun listenForStuckAnswer(): StuckAnswerHandler.VoiceOutcome =
+        suspendCancellableCoroutine { cont ->
+            voice.startListening(
+                onResult = { text -> if (cont.isActive) cont.resume(StuckAnswerHandler.VoiceOutcome.Recognized(text)) },
+                onFailure = { if (cont.isActive) cont.resume(StuckAnswerHandler.VoiceOutcome.Failed) }
+            )
+        }
 
     /**
      * Fires an explicit launch Intent for targetPackage, then polls the
@@ -310,5 +380,6 @@ class CaloOrchestrator(context: Context) {
     fun shutdown() {
         job.cancel()
         voice.destroy()
+        tts.destroy()
     }
 }
