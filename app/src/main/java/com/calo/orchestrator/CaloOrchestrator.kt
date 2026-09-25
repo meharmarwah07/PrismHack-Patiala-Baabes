@@ -5,6 +5,7 @@ import android.content.Intent
 import com.calo.accessibility.CaloAccessibilityService
 import com.calo.data.FlowRepository
 import com.calo.data.LearnedFlow
+import com.calo.domain.nlu.AmbiguityResolver
 import com.calo.domain.nlu.CandidateFlow
 import com.calo.domain.nlu.MatchResult
 import com.calo.domain.nlu.MatchStatus
@@ -76,6 +77,11 @@ class CaloOrchestrator(context: Context) {
                 )
             }
 
+            // NLUClient's own live latency ranges ~0.5-12s (Groq free-tier queuing) --
+            // this is the only signal a caller has that something's happening during
+            // that window, so a UI wiring onStatus to a "still thinking" indicator has
+            // something to bind to for the whole round-trip, not just before/after it.
+            onStatus("Thinking about that...")
             val match = nluClient.match(utterance, candidates)
 
             // Every non-MATCHED status must dead-end here — replay never starts on
@@ -91,37 +97,57 @@ class CaloOrchestrator(context: Context) {
                     return@launch
                 }
                 MatchStatus.AMBIGUOUS -> {
-                    resolveAmbiguity(service, match, flows, onStatus)
+                    resolveAmbiguity(service, match, flows, candidates, onStatus)
                     return@launch
                 }
                 MatchStatus.NEEDS_SLOT, MatchStatus.MATCHED -> Unit // handled below
             }
 
-            val matchedFlow = flows.find { it.id == match.matchedFlowId }
-            if (matchedFlow == null) {
-                // Defensive only: MATCHED with an id NluResponseParser's caller
-                // didn't recognize against its own candidate list shouldn't happen,
-                // since matchedFlowId came from that same candidate list -- but
-                // this is exactly the "malformed reply" case the parser's doc warns
-                // about, so it gets the same "don't replay" treatment as NO_MATCH.
-                onStatus("Didn't recognize \"$utterance\" as any learned flow.")
-                return@launch
-            }
-
-            // T14 (bonus): a slot the flow declares but the command never mentioned
-            // (so the LLM correctly omitted it per NluPrompt's rule) gets asked about
-            // explicitly instead of silently falling back to the taught value --
-            // scoped to right here, before replay starts; SlotResolver's own
-            // taught-value fallback (domain/slots) is untouched.
-            val matchedCandidate = candidates.find { it.id == matchedFlow.id }
-            val missingSlot = matchedCandidate?.slotNames?.firstOrNull { it !in match.slotValues.keys }
-            if (missingSlot != null) {
-                askForMissingSlot(service, matchedFlow, missingSlot, match.slotValues, onStatus)
-                return@launch
-            }
-
-            launchAndReplay(service, matchedFlow, match.slotValues, onStatus)
+            proceedAsMatched(service, flows, candidates, match, utterance, onStatus)
         }
+    }
+
+    /**
+     * The one path from "we have a MATCHED result" to replay -- reached both
+     * directly (a confident single match) and after ambiguity resolves to a
+     * choice (via AmbiguityResolver, which turns the AMBIGUOUS result into a
+     * MATCHED one for its chosen flow). Deliberately the same function for
+     * both: keeping a second, simplified copy of the missing-slot check for
+     * the post-ambiguity case is exactly how slotValues got silently dropped
+     * there before -- one path can't drift out of sync with itself.
+     */
+    private suspend fun proceedAsMatched(
+        service: CaloAccessibilityService,
+        flows: List<LearnedFlow>,
+        candidates: List<CandidateFlow>,
+        match: MatchResult,
+        utterance: String,
+        onStatus: (String) -> Unit
+    ) {
+        val matchedFlow = flows.find { it.id == match.matchedFlowId }
+        if (matchedFlow == null) {
+            // Defensive only: MATCHED with an id NluResponseParser's caller
+            // didn't recognize against its own candidate list shouldn't happen,
+            // since matchedFlowId came from that same candidate list -- but
+            // this is exactly the "malformed reply" case the parser's doc warns
+            // about, so it gets the same "don't replay" treatment as NO_MATCH.
+            onStatus("Didn't recognize \"$utterance\" as any learned flow.")
+            return
+        }
+
+        // T14 (bonus): a slot the flow declares but the command never mentioned
+        // (so the LLM correctly omitted it per NluPrompt's rule) gets asked about
+        // explicitly instead of silently falling back to the taught value --
+        // scoped to right here, before replay starts; SlotResolver's own
+        // taught-value fallback (domain/slots) is untouched.
+        val matchedCandidate = candidates.find { it.id == matchedFlow.id }
+        val missingSlot = matchedCandidate?.slotNames?.firstOrNull { it !in match.slotValues.keys }
+        if (missingSlot != null) {
+            askForMissingSlot(service, matchedFlow, missingSlot, match.slotValues, onStatus)
+            return
+        }
+
+        launchAndReplay(service, matchedFlow, match.slotValues, onStatus)
     }
 
     private fun askForMissingSlot(
@@ -153,6 +179,7 @@ class CaloOrchestrator(context: Context) {
         service: CaloAccessibilityService,
         match: MatchResult,
         flows: List<LearnedFlow>,
+        candidates: List<CandidateFlow>,
         onStatus: (String) -> Unit
     ) {
         val options = match.alternatives.mapNotNull { alt -> flows.find { it.id == alt.flowId } }
@@ -163,7 +190,7 @@ class CaloOrchestrator(context: Context) {
         onStatus("Did you mean " + options.joinToString(" or ") { "\"${it.description}\"" } + "?")
 
         voice.startListening(
-            onResult = { answer -> handleAmbiguityAnswer(service, answer, options, onStatus) },
+            onResult = { answer -> handleAmbiguityAnswer(service, answer, options, match, flows, candidates, onStatus) },
             onFailure = { reason -> onStatus("Didn't catch that: $reason") }
         )
     }
@@ -172,6 +199,9 @@ class CaloOrchestrator(context: Context) {
         service: CaloAccessibilityService,
         answer: String,
         options: List<LearnedFlow>,
+        originalMatch: MatchResult,
+        flows: List<LearnedFlow>,
+        candidates: List<CandidateFlow>,
         onStatus: (String) -> Unit
     ) {
         val lower = answer.lowercase()
@@ -188,8 +218,14 @@ class CaloOrchestrator(context: Context) {
             return
         }
 
+        // AmbiguityResolver carries originalMatch's slotValues forward unchanged -- they
+        // were extracted from the ORIGINAL utterance ("...but paneer"), not tied to
+        // whichever candidate the model ranked first, so resolving the tie doesn't
+        // change what the user asked for. Then the exact same missing-slot-check-then-
+        // replay path a direct match takes, via proceedAsMatched.
+        val resolved = AmbiguityResolver.resolve(originalMatch, chosen.id)
         scope.launch {
-            launchAndReplay(service, chosen, emptyMap(), onStatus)
+            proceedAsMatched(service, flows, candidates, resolved, answer, onStatus)
         }
     }
 

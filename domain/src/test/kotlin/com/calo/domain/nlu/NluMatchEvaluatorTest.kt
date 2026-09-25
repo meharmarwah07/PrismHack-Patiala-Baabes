@@ -62,12 +62,26 @@ class NluMatchEvaluatorTest {
         )
     }
 
+    // Regression (fixed 2026-09-26): slotValues used to be cleared here, so a resolved
+    // ambiguous command ("same as before but paneer") silently replayed the taught
+    // default instead of what the user actually said. See AmbiguityResolverTest for the
+    // full chain through to SlotResolver.
     @Test
-    fun `AMBIGUOUS clears slotValues so a half-picked slot can't leak into replay`() {
+    fun `AMBIGUOUS preserves slotValues -- they were extracted from the utterance, not the losing candidate`() {
         val raw = MatchResult(
             matchedFlowId = "dominos-order",
             confidence = 0.5,
             slotValues = mapOf("item" to "paneer"),
+            alternatives = listOf(Alternative("pizzahut-order", 0.5))
+        )
+        assertEquals(mapOf("item" to "paneer"), NluMatchEvaluator.evaluate(raw).slotValues)
+    }
+
+    @Test
+    fun `AMBIGUOUS with no slots in the utterance still has empty slotValues, not a crash`() {
+        val raw = MatchResult(
+            matchedFlowId = "dominos-order",
+            confidence = 0.5,
             alternatives = listOf(Alternative("pizzahut-order", 0.5))
         )
         assertTrue(NluMatchEvaluator.evaluate(raw).slotValues.isEmpty())

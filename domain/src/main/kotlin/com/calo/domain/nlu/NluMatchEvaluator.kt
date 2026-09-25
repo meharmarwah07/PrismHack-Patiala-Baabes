@@ -47,9 +47,14 @@ object NluMatchEvaluator {
         ) {
             val allConsidered = (listOf(Alternative(topId, topConfidence)) + raw.alternatives)
                 .sortedByDescending { it.confidence }
+            // slotValues are NOT cleared here (regression fixed 2026-09-26): they were
+            // extracted from the utterance itself ("...but paneer" -> item=paneer), not
+            // guessed as belonging to one specific candidate. Which flow the tie resolves
+            // to doesn't change what the user said, so discarding them meant a resolved
+            // ambiguous command silently replayed with the taught default instead of what
+            // was actually asked for. matchedFlowId still nulls out -- no flow is chosen yet.
             return raw.copy(
                 matchedFlowId = null,
-                slotValues = emptyMap(),
                 status = MatchStatus.AMBIGUOUS,
                 alternatives = allConsidered
             )
