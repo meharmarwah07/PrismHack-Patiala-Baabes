@@ -7,6 +7,17 @@
   We do NOT set canPerformGestures="true" — everything we do (CLICK,
   SET_TEXT, SCROLL) is a node-level AccessibilityAction, not a raw
   gesture, so we deliberately keep the permission surface smaller.
+
+  canRequestTouchExplorationMode="true" (Finding 6 fallback, 2026-09-26):
+  a STATIC, permanent capability declaration — required before
+  FLAG_REQUEST_TOUCH_EXPLORATION_MODE means anything at runtime; confirmed
+  on-device that setting the flag via setServiceInfo() without this is
+  silently ignored (dumpsys accessibility's granted capabilities never
+  changed). Declaring it does NOT turn touch exploration on by itself —
+  CaloAccessibilityService still only requests the flag for the duration
+  of a teach session (see setTouchExplorationCapabilityRequested) — but it
+  does mean re-enabling the service in Settings will show a fresh
+  capabilities-consent dialog once, on every device this runs on.
 -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityEventTypes="typeAllMask"
@@ -14,5 +25,6 @@
     android:accessibilityFlags="flagRetrieveInteractiveWindows|flagReportViewIds"
     android:canRetrieveWindowContent="true"
     android:canRequestFilterKeyEvents="false"
+    android:canRequestTouchExplorationMode="true"
     android:notificationTimeout="100"
     android:description="@string/accessibility_service_description" />

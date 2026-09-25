@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -24,7 +26,28 @@ android {
     // Groq API key: never hardcode it. Put GROQ_API_KEY=... in
     // local.properties (gitignored) or an env var of the same name;
     // NLUClient reads it from BuildConfig at runtime.
-    val groqApiKey: String = project.findProperty("GROQ_API_KEY") as String?
+    //
+    // BUG FIXED (24 Sep 2026): this used to read ONLY
+    // `project.findProperty("GROQ_API_KEY")`, which resolves against
+    // Gradle's OWN property system (gradle.properties / -P flags /
+    // ORG_GRADLE_PROJECT_* env vars) — NOT local.properties. AGP only
+    // auto-loads a handful of its own recognized keys (sdk.dir, ndk.dir)
+    // from local.properties; arbitrary custom keys are never exposed to
+    // findProperty(). Confirmed on-device: a real GROQ_API_KEY was present
+    // in local.properties exactly where this comment says to put it, yet
+    // BuildConfig.GROQ_API_KEY was still blank at runtime
+    // (`NLUClient: GROQ_API_KEY is not set`) — every VOICE_COMMAND call was
+    // silently a guaranteed no-match, not a genuine NLU miss. Fixed by
+    // actually loading local.properties here, same as AGP does internally
+    // for sdk.dir.
+    val localProperties = Properties().apply {
+        val localPropertiesFile = rootProject.file("local.properties")
+        if (localPropertiesFile.exists()) {
+            localPropertiesFile.inputStream().use { load(it) }
+        }
+    }
+    val groqApiKey: String = localProperties.getProperty("GROQ_API_KEY")
+        ?: project.findProperty("GROQ_API_KEY") as String?
         ?: System.getenv("GROQ_API_KEY")
         ?: ""
 

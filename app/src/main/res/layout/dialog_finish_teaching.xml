@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Shown when the user taps "Finish Teaching". CaloOrchestrator.finishTeaching()
+  needs a trigger utterance (matched against speech later) and a description
+  (shown in any future "what has Calo learned" list) — this is the one bit of
+  UI those two params require; everything else about teaching happens via
+  taps captured by the accessibility service, not this dialog.
+-->
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:paddingStart="24dp"
+    android:paddingTop="20dp"
+    android:paddingEnd="24dp"
+    android:paddingBottom="8dp">
+
+    <EditText
+        android:id="@+id/triggerUtteranceInput"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="@string/dialog_trigger_utterance_hint"
+        android:inputType="text"
+        android:maxLines="2" />
+
+    <EditText
+        android:id="@+id/descriptionInput"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:hint="@string/dialog_description_hint"
+        android:inputType="text"
+        android:maxLines="1" />
+
+</LinearLayout>

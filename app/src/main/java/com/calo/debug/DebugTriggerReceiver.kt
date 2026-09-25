@@ -14,6 +14,9 @@ class DebugTriggerReceiver : BroadcastReceiver() {
         const val ACTION_FINISH_TEACHING = "com.calo.debug.FINISH_TEACHING"
         const val ACTION_REPLAY_LATEST = "com.calo.debug.REPLAY_LATEST"
         const val ACTION_VOICE_COMMAND = "com.calo.debug.VOICE_COMMAND"
+        const val ACTION_SET_TOUCH_EXPLORATION = "com.calo.debug.SET_TOUCH_EXPLORATION"
+        const val ACTION_DUMP_FLOWS = "com.calo.debug.DUMP_FLOWS"
+        const val ACTION_DELETE_FLOWS_BY_ID = "com.calo.debug.DELETE_FLOWS_BY_ID"
     }
 
     override fun onReceive(context: Context, intent: Intent) {
@@ -52,6 +55,23 @@ class DebugTriggerReceiver : BroadcastReceiver() {
                 Log.i(TAG, "Simulating voice command (debug, real Groq call): \"$utterance\"")
                 service.orchestrator.handleUtterance(utterance) { status ->
                     Log.i(TAG, "Voice command result: $status")
+                }
+            }
+
+            ACTION_SET_TOUCH_EXPLORATION -> {
+                val requested = intent.getBooleanExtra("requested", false)
+                service.setTouchExplorationCapabilityRequested(requested)
+                Log.i(TAG, "Touch exploration capability requested=$requested (now=${service.isTouchExplorationCapabilityRequested()})")
+            }
+
+            ACTION_DELETE_FLOWS_BY_ID -> {
+                val ids = intent.getStringExtra("ids")?.split(",")?.map { it.trim() }?.toSet() ?: emptySet()
+                service.orchestrator.deleteFlowsByIds(ids) { result -> Log.i(TAG, result) }
+            }
+
+            ACTION_DUMP_FLOWS -> {
+                service.orchestrator.dumpAllFlows { dump ->
+                    dump.lines().forEach { Log.i(TAG, "FLOWDUMP: $it") }
                 }
             }
 

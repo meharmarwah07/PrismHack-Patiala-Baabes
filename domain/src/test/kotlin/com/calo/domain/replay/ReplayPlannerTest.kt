@@ -20,7 +20,8 @@ private class FakeNodeProvider(
     private val screenSignalsByCall: Map<Int, ScreenSignals> = emptyMap(),
     private val defaultSignals: ScreenSignals,
     private val missingAnchors: Set<String> = emptySet(),
-    private val failingActions: Set<String> = emptySet() // node ids that fail their action
+    private val failingActions: Set<String> = emptySet(), // node ids that fail their action
+    private val availableOptions: Set<String> = emptySet() // text values findNodeByValue can find on screen
 ) : NodeProvider {
     private var callCount = 0
     val clickCalls = mutableListOf<String>()
@@ -37,6 +38,11 @@ private class FakeNodeProvider(
         val id = anchor.resourceId ?: anchor.text ?: "unknown"
         if (id in missingAnchors) return null
         return FakeNode(id)
+    }
+
+    override fun findNodeByValue(value: String): NodeHandle? {
+        if (value !in availableOptions) return null
+        return FakeNode("option:$value")
     }
 
     override fun performClick(node: NodeHandle): Boolean {
@@ -74,6 +80,11 @@ class ReplayPlannerTest {
     private fun setTextStep(order: Int, resourceId: String, recorded: String, slotName: String? = null) = FlowStep(
         order = order, action = ActionType.SET_TEXT, target = ElementAnchor(resourceId = resourceId),
         recordedValue = recorded, slotName = slotName
+    )
+
+    private fun clickStepWithSlot(order: Int, resourceId: String, recordedText: String, slotName: String) = FlowStep(
+        order = order, action = ActionType.CLICK,
+        target = ElementAnchor(resourceId = resourceId, text = recordedText), slotName = slotName
     )
 
     @Test
@@ -154,6 +165,71 @@ class ReplayPlannerTest {
         val result = ReplayPlanner.replay(steps, mapOf("item" to "Pepperoni"), provider)
         assertEquals(ReplayResult.Completed, result)
         assertEquals(listOf("id/item_search" to "Pepperoni"), provider.setTextCalls)
+    }
+
+    @Test
+    fun `CLICK slot value differing from recorded searches by the new value, not the stale original anchor`() {
+        // Taught tapping "Home" (resourceId id/address_row); replaying with
+        // slot value "Work" available on screen must tap "Work", never fall
+        // back to re-resolving id/address_row (which would silently tap
+        // whatever "Home" still resolves to — the exact bug being fixed).
+        val steps = listOf(clickStepWithSlot(1, "id/address_row", recordedText = "Home", slotName = "address"))
+        val provider = FakeNodeProvider(emptyMap(), clearSignals, availableOptions = setOf("Work"))
+        val result = ReplayPlanner.replay(steps, mapOf("address" to "Work"), provider)
+
+        assertEquals(ReplayResult.Completed, result)
+        assertEquals(listOf("option:Work"), provider.clickCalls)
+        assertTrue(provider.clickCalls.none { it == "id/address_row" })
+    }
+
+    @Test
+    fun `CLICK slot value with no matching option on screen is Stuck, never falls back to the wrong original tap`() {
+        val steps = listOf(clickStepWithSlot(1, "id/address_row", recordedText = "Home", slotName = "address"))
+        val provider = FakeNodeProvider(emptyMap(), clearSignals, availableOptions = emptySet())
+        val result = ReplayPlanner.replay(steps, mapOf("address" to "Work"), provider)
+
+        assertTrue(result is ReplayResult.Stuck)
+        assertEquals(1, (result as ReplayResult.Stuck).atStepOrder)
+        assertTrue(result.reason.contains("Work"))
+        assertTrue(provider.clickCalls.isEmpty()) // no wrong tap attempted either
+    }
+
+    @Test
+    fun `CLICK slot value equal to what was recorded uses the normal anchor path, not the search path`() {
+        val steps = listOf(clickStepWithSlot(1, "id/address_row", recordedText = "Home", slotName = "address"))
+        val provider = FakeNodeProvider(emptyMap(), clearSignals) // no availableOptions configured
+        val result = ReplayPlanner.replay(steps, mapOf("address" to "Home"), provider)
+
+        assertEquals(ReplayResult.Completed, result)
+        assertEquals(listOf("id/address_row"), provider.clickCalls)
+    }
+
+    @Test
+    fun `CLICK slotName present but no value supplied (T2, exact replay) uses the normal anchor path unchanged`() {
+        val steps = listOf(clickStepWithSlot(1, "id/address_row", recordedText = "Home", slotName = "address"))
+        val provider = FakeNodeProvider(emptyMap(), clearSignals)
+        val result = ReplayPlanner.replay(steps, emptyMap(), provider)
+
+        assertEquals(ReplayResult.Completed, result)
+        assertEquals(listOf("id/address_row"), provider.clickCalls)
+    }
+
+    @Test
+    fun `SET_TEXT slot substitution is unaffected by the CLICK slot-search fix`() {
+        // Same flow as the pre-existing generalization test, run again after
+        // touching ReplayPlanner's CLICK branch, to pin down that SET_TEXT's
+        // code path (SlotResolver.resolveValue, provider.findNode) was not
+        // disturbed by adding the CLICK-only resolveClickTarget path.
+        val steps = listOf(
+            setTextStep(1, "id/item_search", "Margherita", slotName = "item"),
+            clickStepWithSlot(2, "id/address_row", recordedText = "Home", slotName = "address")
+        )
+        val provider = FakeNodeProvider(emptyMap(), clearSignals, availableOptions = setOf("Work"))
+        val result = ReplayPlanner.replay(steps, mapOf("item" to "Pepperoni", "address" to "Work"), provider)
+
+        assertEquals(ReplayResult.Completed, result)
+        assertEquals(listOf("id/item_search" to "Pepperoni"), provider.setTextCalls)
+        assertEquals(listOf("option:Work"), provider.clickCalls)
     }
 
     @Test

@@ -15,8 +15,26 @@
 
     <application
         android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:label="Calo"
-        android:theme="@android:style/Theme.DeviceDefault.Light">
+        android:theme="@style/Theme.Calo">
+
+        <!--
+          The home screen — marble tap for voice, pill button to teach a
+          flow. Everything it calls (CaloOrchestrator.startVoiceCommand /
+          startTeaching / finishTeaching) already existed before this UI
+          pass; this activity is the first real caller of any of it.
+        -->
+        <activity
+            android:name=".ui.MainActivity"
+            android:exported="true"
+            android:theme="@style/Theme.Calo">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
 
         <service
             android:name=".accessibility.CaloAccessibilityService"
@@ -39,6 +57,9 @@
                 <action android:name="com.calo.debug.FINISH_TEACHING" />
                 <action android:name="com.calo.debug.REPLAY_LATEST" />
                 <action android:name="com.calo.debug.VOICE_COMMAND" />
+                <action android:name="com.calo.debug.SET_TOUCH_EXPLORATION" />
+                <action android:name="com.calo.debug.DUMP_FLOWS" />
+                <action android:name="com.calo.debug.DELETE_FLOWS_BY_ID" />
             </intent-filter>
         </receiver>
 

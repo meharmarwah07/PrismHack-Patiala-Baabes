@@ -2,4 +2,35 @@
 <resources>
     <string name="app_name">Calo</string>
     <string name="accessibility_service_description">Lets Calo learn a flow from one voice+tap demo and replay it later on your command. Never acts on password, OTP, or payment screens.</string>
+
+    <!-- Home screen (UI pass) -->
+    <string name="menu_content_description">Menu</string>
+    <string name="profile_content_description">Profile</string>
+    <string name="marble_content_description">Tap and speak a command</string>
+    <string name="status_idle">Tap the marble and say what you want, or teach Calo something new.</string>
+    <string name="status_listening">Listening…</string>
+    <string name="status_mic_permission_needed">Calo needs microphone access to hear voice commands.</string>
+    <string name="status_teaching_active">Teaching — demonstrate the flow, then tap Finish Teaching.</string>
+    <string name="status_service_disabled">Calo\'s accessibility service isn\'t on — enable it in Settings → Accessibility → Calo.</string>
+
+    <string name="action_start_teaching">Teach a Flow</string>
+    <string name="action_finish_teaching">Finish Teaching</string>
+
+    <string name="dialog_finish_teaching_title">Save this flow</string>
+    <string name="dialog_trigger_utterance_hint">What will you say to trigger it? e.g. \"order my usual pizza\"</string>
+    <string name="dialog_description_hint">Short label, e.g. \"Order pepperoni pizza\"</string>
+    <string name="dialog_save">Save</string>
+    <string name="dialog_cancel">Cancel</string>
+    <string name="dialog_fields_required">Both fields are required to save the flow.</string>
+    <string name="status_flow_saved">Saved. Try the phrase you just taught.</string>
+    <string name="status_flow_save_failed">Nothing was captured — demonstrate at least one tap before finishing.</string>
+    <string name="status_flow_no_action_captured">Didn\'t catch that tap — only incidental screen activity was recorded. Try again.</string>
+
+    <!-- Slot review (shown between Finish Teaching and the save dialog above) -->
+    <string name="dialog_promote_slots_title">Which values change each time?</string>
+    <string name="dialog_promote_slots_intro">Leave a step blank to always repeat the exact same value. Name it (e.g. \"item\", \"quantity\") to let voice commands fill in something different each time.</string>
+    <string name="dialog_slot_name_hint">Slot name — leave blank to keep this value fixed</string>
+    <string name="dialog_next">Next</string>
+    <string name="step_label_typed">Typed \"%1$s\"</string>
+    <string name="step_label_tapped">Tapped \"%1$s\"</string>
 </resources>

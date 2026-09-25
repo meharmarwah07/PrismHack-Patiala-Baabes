@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="calo_bg">#0A0A0A</color>
+    <color name="calo_surface">#161616</color>
+
+    <color name="calo_coral">#FF6F52</color>
+    <color name="calo_orange">#FF9A4D</color>
+
+    <color name="calo_peach">#FFD3AE</color>
+    <color name="calo_peach_dark">#3A2515</color>
+
+    <color name="calo_swirl_magenta">#E23F91</color>
+    <color name="calo_swirl_orange">#FF8A3D</color>
+    <color name="calo_swirl_yellow">#FFD23D</color>
+
+    <color name="calo_text_primary">#F5F1EA</color>
+    <color name="calo_text_secondary">#A8A29B</color>
+
+    <color name="calo_button_text">#241608</color>
+</resources>

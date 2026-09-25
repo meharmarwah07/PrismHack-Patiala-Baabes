@@ -21,6 +21,18 @@ interface NodeProvider {
     /** Priority-order resolution: resourceId > text > contentDescription > className+index. Null = not found. */
     fun findNode(anchor: ElementAnchor): NodeHandle?
 
+    /**
+     * Finds an on-screen element by text/contentDescription equal to
+     * [value] — NOT the step's own anchor. Used only for a CLICK step whose
+     * slot value differs from what was recorded at teach time (see
+     * SlotResolver.resolveClickTarget): the taught anchor describes the OLD
+     * option (e.g. "Home"), so re-resolving it would tap the wrong element;
+     * this searches for the NEW one (e.g. "Work") instead. Null = no
+     * matching option currently on screen — callers must treat that as
+     * Stuck, never fall back to [findNode].
+     */
+    fun findNodeByValue(value: String): NodeHandle?
+
     fun performClick(node: NodeHandle): Boolean
     fun performSetText(node: NodeHandle, value: String): Boolean
     fun performScroll(node: NodeHandle, forward: Boolean): Boolean

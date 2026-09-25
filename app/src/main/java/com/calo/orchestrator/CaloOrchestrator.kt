@@ -5,6 +5,8 @@ import android.content.Intent
 import com.calo.accessibility.CaloAccessibilityService
 import com.calo.data.FlowRepository
 import com.calo.data.LearnedFlow
+import com.calo.domain.model.FlowStep
+import com.calo.domain.model.SlotDefinition
 import com.calo.domain.nlu.CandidateFlow
 import com.calo.domain.replay.ReplayResult
 import com.calo.nlu.NLUClient
@@ -74,6 +76,14 @@ class CaloOrchestrator(context: Context) {
             }
 
             val match = nluClient.match(utterance, candidates)
+            // Logged separately from the user-facing status below on
+            // purpose: this is the ONLY place the raw NLU decision
+            // (matchedFlowId/confidence/slotValues) is visible at all — a
+            // failure downstream (wrong flow, wrong slot value, or replay
+            // itself going Stuck/Halted) is otherwise undiagnosable from
+            // logs alone, since describeResult() only ever shows the FINAL
+            // outcome, never what Groq actually returned.
+            android.util.Log.d("Calo", "NLU match: matchedFlowId=${match.matchedFlowId} confidence=${match.confidence} slotValues=${match.slotValues} candidates=${candidates.map { it.id to it.triggerUtterance }}")
             val matchedFlow = flows.find { it.id == match.matchedFlowId }
             if (matchedFlow == null) {
                 onStatus("Didn't recognize \"$utterance\" as any learned flow.")
@@ -135,6 +145,22 @@ class CaloOrchestrator(context: Context) {
         CaloAccessibilityService.instance?.startTeaching()
     }
 
+    /**
+     * Debug-only convenience: stop + save in one call, no slot review, so
+     * DebugTriggerReceiver's FINISH_TEACHING broadcast can drive an
+     * end-to-end teach/replay cycle over adb without any UI. slots stays
+     * empty on purpose — this is the "exact replay, literal values" path
+     * SlotResolver's own comment calls out as T2, not a shortcut that
+     * skips something the real UI is supposed to do.
+     *
+     * The real UI (MainActivity) does NOT call this. It needs a slot-review
+     * step between stopping teaching and saving, and stopTeaching() can only
+     * be called once per session (it nulls out the service's recorder), so
+     * MainActivity calls CaloAccessibilityService.stopTeaching() itself and
+     * then calls saveTaughtFlow() below once review is done. Two methods,
+     * two disjoint call sites — neither one races the other to stop
+     * teaching twice.
+     */
     fun finishTeaching(triggerUtterance: String, description: String, onSaved: (success: Boolean) -> Unit) {
         val service = CaloAccessibilityService.instance
         val recorder = service?.stopTeaching()
@@ -148,6 +174,15 @@ class CaloOrchestrator(context: Context) {
             onSaved(false)
             return
         }
+        if (!recorder.hasRecordedUserAction()) {
+            // Same guard as MainActivity.beginFinishTeaching — see
+            // TeachRecorder.hasRecordedUserAction's doc. Steps here are
+            // incidental-only (e.g. a popup's SCROLL with no CLICK/SET_TEXT
+            // for what the person actually tapped ever recorded).
+            android.util.Log.w("Calo", "Refusing to save: session captured ${steps.size} step(s), none a CLICK/SET_TEXT — likely a click event never reached the service (see TeachRecorder.hasRecordedUserAction)")
+            onSaved(false)
+            return
+        }
 
         scope.launch {
             repository.save(
@@ -157,6 +192,41 @@ class CaloOrchestrator(context: Context) {
                     description = description,
                     steps = steps,
                     slots = emptyList()
+                )
+            )
+            onSaved(true)
+        }
+    }
+
+    /**
+     * Saves a flow whose teaching session was already stopped by the
+     * caller (MainActivity, after its slot-review dialog ran against the
+     * live TeachRecorder). Takes the already-finalized steps/slots rather
+     * than reaching for a recorder itself — there is no recorder left to
+     * reach for, since stopTeaching() nulls it out on the service the
+     * moment it's called.
+     */
+    fun saveTaughtFlow(
+        steps: List<FlowStep>,
+        targetPackage: String,
+        slots: List<SlotDefinition>,
+        triggerUtterance: String,
+        description: String,
+        onSaved: (success: Boolean) -> Unit
+    ) {
+        if (steps.isEmpty() || targetPackage.isBlank()) {
+            onSaved(false)
+            return
+        }
+
+        scope.launch {
+            repository.save(
+                LearnedFlow(
+                    targetPackage = targetPackage,
+                    triggerUtterance = triggerUtterance,
+                    description = description,
+                    steps = steps,
+                    slots = slots
                 )
             )
             onSaved(true)
@@ -194,6 +264,46 @@ class CaloOrchestrator(context: Context) {
             val engine = ReplayEngine(service)
             val result = engine.replay(latest.steps, emptyMap())
             onStatus(describeResult(result))
+        }
+    }
+
+    /**
+     * Task 4/T1 verification tooling (2026-09-26): dumps every saved
+     * LearnedFlow's targetPackage and full step list to logcat via
+     * [onResult] — a raw-file pull of the Room WAL database proved
+     * unreliable to extract off-device, so this reads it the way the app
+     * itself does, through the same repository every other code path uses.
+     */
+    fun dumpAllFlows(onResult: (String) -> Unit) {
+        scope.launch {
+            val flows = repository.all()
+            if (flows.isEmpty()) {
+                onResult("No flows saved.")
+                return@launch
+            }
+            val dump = flows.joinToString(separator = "\n---\n") { flow ->
+                buildString {
+                    appendLine("id=${flow.id} targetPackage=${flow.targetPackage} trigger=\"${flow.triggerUtterance}\" description=\"${flow.description}\" createdAt=${flow.createdAt}")
+                    flow.steps.forEach { step ->
+                        appendLine(
+                            "  step order=${step.order} action=${step.action} slotName=${step.slotName} recordedValue=${step.recordedValue} " +
+                                "anchor(resourceId=${step.target.resourceId}, text=${step.target.text}, contentDescription=${step.target.contentDescription}, " +
+                                "className=${step.target.className}, indexInParent=${step.target.indexInParent})"
+                        )
+                    }
+                }
+            }
+            onResult(dump)
+        }
+    }
+
+    /** Cleanup tooling (2026-09-26): deletes saved flows by id — used to clear tonight's junk/debug teach sessions before a real re-teach. */
+    fun deleteFlowsByIds(ids: Set<String>, onResult: (String) -> Unit) {
+        scope.launch {
+            val flows = repository.all()
+            val toDelete = flows.filter { it.id in ids }
+            toDelete.forEach { repository.delete(it) }
+            onResult("Deleted ${toDelete.size}/${ids.size} requested flows.")
         }
     }
 

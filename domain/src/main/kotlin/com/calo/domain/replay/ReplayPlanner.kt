@@ -42,8 +42,20 @@ object ReplayPlanner {
                     true
                 }
                 ActionType.CLICK -> {
-                    val node = provider.findNode(step.target)
-                        ?: return ReplayResult.Stuck(step.order, "element not found: ${step.target}")
+                    // A slot value that genuinely differs from what was
+                    // taught means the original anchor now names the WRONG
+                    // option (e.g. taught tapping "Home", replaying with
+                    // "Work") — re-resolving that anchor would silently tap
+                    // the stale element instead of generalizing, so this
+                    // searches by the new value instead of using findNode().
+                    val searchValue = SlotResolver.resolveClickTarget(step, slotValues)
+                    val node = if (searchValue != null) {
+                        provider.findNodeByValue(searchValue)
+                            ?: return ReplayResult.Stuck(step.order, "couldn't find an option matching '$searchValue'")
+                    } else {
+                        provider.findNode(step.target)
+                            ?: return ReplayResult.Stuck(step.order, "element not found: ${step.target}")
+                    }
                     provider.performClick(node)
                 }
                 ActionType.SET_TEXT -> {
