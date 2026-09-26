@@ -80,6 +80,20 @@ class CaloAccessibilityService : AccessibilityService() {
         super.onServiceConnected()
         instance = this
         orchestrator = CaloOrchestrator(applicationContext)
+        // Confirmed on-device (2026-09-26): if this process is killed while
+        // touch exploration is armed (background-app killer, not a clean
+        // stopTeaching()/onDestroy()), the system can leave the capability
+        // flag stuck ON for the NEXT process instance, with no
+        // TouchInteractionController/callback alive to ever call
+        // requestDelegating() for it — every tap then falls back to raw
+        // touch-exploration semantics (tap to focus, second tap to
+        // activate) with no way to self-heal. The existing watchdog
+        // (TOUCH_CAPTURE_WATCHDOG_MS) can't help here: it's a Handler
+        // callback that dies along with the process it was scheduled on.
+        // A fresh connection should never start armed, so defensively
+        // clear it every time regardless of what the previous instance left
+        // behind.
+        setTouchExplorationCapabilityRequested(false)
     }
 
     override fun onDestroy() {
