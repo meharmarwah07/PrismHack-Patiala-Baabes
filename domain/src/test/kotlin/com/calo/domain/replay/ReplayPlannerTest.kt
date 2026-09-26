@@ -27,13 +27,28 @@ private class FakeNodeProvider(
     // routes through the REAL ClickValueMatcher, the same algorithm
     // NodeWalker.findBySlotValue uses in :app, so this fake proves the
     // production matching/ambiguity rules, not a hand-simplified stand-in.
-    private val availableOptions: List<String> = emptyList()
+    private val availableOptions: List<String> = emptyList(),
+    // Simulates the screen changing BETWEEN two replay steps that share the
+    // same taught anchor (2026-09-26: tonight's Zomato teach run recorded
+    // the same "Domino's Pizza" CLICK anchor 5 times in a row) -- keyed by
+    // anchor id, then by WHICH call number for that id (1st, 2nd, ...)
+    // should resolve to null instead of a real node. A static
+    // `missingAnchors` entry can't express "found the first time, gone by
+    // the second", since it applies to every call for that id.
+    private val missingOnOccurrence: Map<String, Set<Int>> = emptyMap(),
+    // Same idea, but "the anchor still resolves to SOMETHING on the new
+    // screen, just not the same element" (e.g. a generic resourceId reused
+    // across screens) -- returns a distinguishable stand-in node so a test
+    // can prove a duplicate step never taps it.
+    private val differentNodeOnOccurrence: Map<String, Set<Int>> = emptyMap()
 ) : NodeProvider {
     private var callCount = 0
     val clickCalls = mutableListOf<String>()
     val setTextCalls = mutableListOf<Pair<String, String>>()
     val scrollCalls = mutableListOf<String>()
+    val findNodeCalls = mutableListOf<String>()
     var idleCalls = 0
+    private val findNodeOccurrences = mutableMapOf<String, Int>()
 
     override fun currentScreenSignals(): ScreenSignals {
         callCount++
@@ -42,7 +57,13 @@ private class FakeNodeProvider(
 
     override fun findNode(anchor: ElementAnchor): NodeHandle? {
         val id = anchor.resourceId ?: anchor.text ?: "unknown"
+        findNodeCalls += id
+        val occurrence = (findNodeOccurrences[id] ?: 0) + 1
+        findNodeOccurrences[id] = occurrence
+
         if (id in missingAnchors) return null
+        if (occurrence in (missingOnOccurrence[id] ?: emptySet())) return null
+        if (occurrence in (differentNodeOnOccurrence[id] ?: emptySet())) return FakeNode("$id#occurrence$occurrence")
         return FakeNode(id)
     }
 
@@ -292,5 +313,122 @@ class ReplayPlannerTest {
         val result = ReplayPlanner.replay(steps, emptyMap(), provider)
         assertEquals(ReplayResult.Completed, result)
         assertEquals(1, provider.idleCalls)
+    }
+
+    // ---- consecutive duplicate CLICK steps (2026-09-26 Zomato capture bug) ----
+
+    @Test
+    fun `consecutive identical CLICK steps -- only the first is tapped, duplicates never re-resolved`() {
+        // Mirrors tonight's actual Zomato capture: the same anchor recorded
+        // 5 times in a row. Proves the fix at the strongest level: not just
+        // "no extra taps", but that findNode is never even CALLED again for
+        // the duplicates -- the old code would have called it 5 times.
+        val steps = listOf(
+            clickStep(1, "id/pizza_row"),
+            clickStep(2, "id/pizza_row"),
+            clickStep(3, "id/pizza_row"),
+            clickStep(4, "id/pizza_row"),
+            clickStep(5, "id/pizza_row")
+        )
+        val provider = FakeNodeProvider(emptyMap(), clearSignals)
+        val result = ReplayPlanner.replay(steps, emptyMap(), provider)
+
+        assertEquals(ReplayResult.Completed, result)
+        assertEquals(listOf("id/pizza_row"), provider.clickCalls)
+        assertEquals(listOf("id/pizza_row"), provider.findNodeCalls)
+    }
+
+    @Test
+    fun `consecutive identical CLICK steps still gate-check every step, even the skipped ones`() {
+        // The "checked before EVERY step, no exceptions" guarantee must not
+        // grow a silent gap for a step that gets skipped as a duplicate --
+        // a payment screen appearing on step 2 must still halt there.
+        val steps = listOf(
+            clickStep(1, "id/pizza_row"),
+            clickStep(2, "id/pizza_row")
+        )
+        val signalsByCall = mapOf(1 to clearSignals, 2 to paymentSignals)
+        val provider = FakeNodeProvider(signalsByCall, defaultSignals = paymentSignals)
+        val result = ReplayPlanner.replay(steps, emptyMap(), provider)
+
+        assertTrue(result is ReplayResult.Halted)
+        assertEquals(2, (result as ReplayResult.Halted).atStepOrder)
+        assertEquals(listOf("id/pizza_row"), provider.clickCalls) // step 1 ran; step 2 never reached the dup-skip at all
+    }
+
+    @Test
+    fun `a real screen transition does NOT suppress deduplication -- the risk this fix closes`() {
+        // The scenario the "harmless no-op" assumption never actually
+        // tested: by the time step 2 would run, the screen has moved on and
+        // this same anchor id no longer resolves to anything at all. Under
+        // the OLD behavior (blind re-resolve) this would go Stuck. Under the
+        // fix, step 2 is skipped before ever calling findNode, so it never
+        // has the chance to fail -- proving the duplicate is genuinely never
+        // re-resolved, not just "re-resolved and got lucky".
+        val steps = listOf(
+            clickStep(1, "id/pizza_row"),
+            clickStep(2, "id/pizza_row")
+        )
+        val provider = FakeNodeProvider(
+            emptyMap(), clearSignals,
+            missingOnOccurrence = mapOf("id/pizza_row" to setOf(2))
+        )
+        val result = ReplayPlanner.replay(steps, emptyMap(), provider)
+
+        assertEquals(ReplayResult.Completed, result)
+        assertEquals(listOf("id/pizza_row"), provider.clickCalls)
+        assertEquals(listOf("id/pizza_row"), provider.findNodeCalls) // only 1 entry: step 2 never attempted
+    }
+
+    @Test
+    fun `a same-id DIFFERENT element on the new screen is also never tapped by a duplicate step`() {
+        // The subtler half of the same risk: the anchor DOES still resolve
+        // on the new screen (same resourceId/text can legitimately describe
+        // a different real element, e.g. a generic id reused across
+        // screens) -- so the old "no-op" assumption wasn't even reliably
+        // safe when the anchor DID resolve. This configures step 2's
+        // occurrence to resolve to a distinguishable stand-in node; the fix
+        // must never tap it, because step 2 is skipped before resolving at all.
+        val steps = listOf(
+            clickStep(1, "id/pizza_row"),
+            clickStep(2, "id/pizza_row")
+        )
+        val provider = FakeNodeProvider(
+            emptyMap(), clearSignals,
+            differentNodeOnOccurrence = mapOf("id/pizza_row" to setOf(2))
+        )
+        val result = ReplayPlanner.replay(steps, emptyMap(), provider)
+
+        assertEquals(ReplayResult.Completed, result)
+        assertEquals(listOf("id/pizza_row"), provider.clickCalls)
+        assertTrue(provider.clickCalls.none { it.contains("occurrence") })
+    }
+
+    @Test
+    fun `duplicate CLICK detection requires the SAME anchor -- different anchors both run normally`() {
+        val steps = listOf(
+            clickStep(1, "id/pizza_row"),
+            clickStep(2, "id/add_to_cart") // different anchor -- not a duplicate, must still run
+        )
+        val provider = FakeNodeProvider(emptyMap(), clearSignals)
+        val result = ReplayPlanner.replay(steps, emptyMap(), provider)
+
+        assertEquals(ReplayResult.Completed, result)
+        assertEquals(listOf("id/pizza_row", "id/add_to_cart"), provider.clickCalls)
+    }
+
+    @Test
+    fun `duplicate detection is scoped to CLICK only -- a repeated SCROLL on the same anchor is NOT deduplicated`() {
+        // A taught "scroll down twice" on the same list is a normal,
+        // intentional pattern (unlike a duplicate CLICK, which is always a
+        // capture artifact) -- this fix must not break it.
+        val scrollStep = { order: Int -> FlowStep(order = order, action = ActionType.SCROLL, target = ElementAnchor(resourceId = "id/results_list")) }
+        val steps = listOf(scrollStep(1), scrollStep(2))
+        val provider = FakeNodeProvider(emptyMap(), clearSignals)
+        val result = ReplayPlanner.replay(steps, emptyMap(), provider)
+
+        assertEquals(ReplayResult.Completed, result)
+        assertEquals(listOf("id/results_list", "id/results_list"), provider.scrollCalls)
+        assertEquals(listOf("id/results_list", "id/results_list"), provider.findNodeCalls)
     }
 }
