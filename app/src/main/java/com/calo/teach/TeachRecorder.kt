@@ -660,10 +660,18 @@ class TeachRecorder(
     private fun countVisibleTextNodes(node: AccessibilityNodeInfo, limit: Int): Int {
         var count = if (!node.text.isNullOrBlank() || !node.contentDescription.isNullOrBlank()) 1 else 0
         for (i in 0 until node.childCount) {
+            // Breaks out entirely once the limit is hit, rather than only
+            // skipping the recursive descent (2026-09-26, real ANR #2): a
+            // wide node — Zomato's home screen flattens large lists/grids
+            // into hundreds of direct accessibility children — still paid
+            // one getChild() Binder round-trip per remaining sibling even
+            // past the limit, which is the same per-node IPC cost the
+            // original ANR was caused by, just no longer compounded by
+            // depth. Confirmed via a second on-device ANR trace, same
+            // stack, after the depth-only fix was already live.
+            if (count >= limit) break
             val child = node.getChild(i) ?: continue
-            if (count < limit) {
-                count += countVisibleTextNodes(child, limit - count)
-            }
+            count += countVisibleTextNodes(child, limit - count)
             child.recycle()
         }
         return count
