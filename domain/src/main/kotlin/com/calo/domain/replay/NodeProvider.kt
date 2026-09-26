@@ -2,6 +2,7 @@ package com.calo.domain.replay
 
 import com.calo.domain.gate.ScreenSignals
 import com.calo.domain.model.ElementAnchor
+import com.calo.domain.semantic.ScreenElement
 
 /** Opaque handle to a resolved on-screen element. Real impl wraps AccessibilityNodeInfo. */
 interface NodeHandle
@@ -39,4 +40,20 @@ interface NodeProvider {
 
     /** Blocks/suspends until the screen has settled. No return value — WAIT can't itself fail. */
     fun awaitIdle()
+
+    // ---- Semantic layer. Defaults make a provider that only supports
+    // exact replay (e.g. an older test fake) behave as "no semantic info
+    // on this screen", which falls back to exactly the old behaviour.
+
+    /** Every actionable element on screen right now, for RoleMatcher / PopupRules. */
+    fun screenElements(): List<ScreenElement> = emptyList()
+
+    /** The live node for an element from the most recent [screenElements] call. Null = gone. */
+    fun nodeForElement(element: ScreenElement): NodeHandle? = null
+
+    /** Presses the keyboard's Enter/Search key on the focused input. False if unsupported or nothing focused. */
+    fun submitCurrentInput(): Boolean = false
+
+    /** Called after every performed action: wait for whatever it triggered to finish drawing. */
+    fun awaitScreenChange() {}
 }

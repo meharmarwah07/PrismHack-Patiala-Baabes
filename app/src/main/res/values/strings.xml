@@ -33,4 +33,6 @@
     <string name="dialog_next">Next</string>
     <string name="step_label_typed">Typed \"%1$s\"</string>
     <string name="step_label_tapped">Tapped \"%1$s\"</string>
+    <string name="dialog_yes">Yes</string>
+    <string name="dialog_no">No</string>
 </resources>

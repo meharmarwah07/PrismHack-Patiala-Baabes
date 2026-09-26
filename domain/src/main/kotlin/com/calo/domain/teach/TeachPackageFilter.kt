@@ -28,8 +28,20 @@ object TeachPackageFilter {
      * behavior, rather than treating resolution failure as "exclude
      * nothing" across the board.
      */
-    fun isExcluded(packageName: String?, ownPackageName: String, launcherPackageName: String?): Boolean {
+    /**
+     * [keyboardPackageName]: the current on-screen keyboard app. Its events
+     * are key/suggestion presses — never a step of the flow, and recording
+     * them would amount to logging what the user types. Added 27 Sep 2026
+     * when touch capture started staying on while the keyboard is up.
+     */
+    fun isExcluded(
+        packageName: String?,
+        ownPackageName: String,
+        launcherPackageName: String?,
+        keyboardPackageName: String? = null
+    ): Boolean {
         if (packageName == null) return true
+        if (keyboardPackageName != null && packageName == keyboardPackageName) return true
         if (packageName == ownPackageName) return true
         if (launcherPackageName != null && packageName == launcherPackageName) return true
         if (packageName == SYSTEM_UI_PACKAGE) return true

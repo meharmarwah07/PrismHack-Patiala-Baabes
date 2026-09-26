@@ -5,7 +5,8 @@ data class CandidateFlow(
     val id: String,
     val triggerUtterance: String,   // the exact sentence spoken while teaching
     val description: String,
-    val slotNames: List<String>     // names the LLM should extract values for, if matched
+    val slotNames: List<String>,    // names the LLM should extract values for, if matched
+    val appName: String? = null     // human name of the app it was taught on, e.g. "Amazon"
 )
 
 /**
@@ -17,5 +18,8 @@ data class CandidateFlow(
 data class MatchResult(
     val matchedFlowId: String?,
     val slotValues: Map<String, String> = emptyMap(),
-    val confidence: Double = 0.0
+    val confidence: Double = 0.0,
+    // An app the user explicitly named ("...on Myntra"), which may differ
+    // from the app the matched flow was taught on. Null = none named.
+    val targetApp: String? = null
 )

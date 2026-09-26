@@ -34,4 +34,12 @@ class NluPromptTest {
         val prompt = NluPrompt.build("x", emptyList())
         assertTrue(prompt.contains("no markdown fences"))
     }
+
+    @Test
+    fun `names each flow's app and asks for a target app`() {
+        val candidates = listOf(CandidateFlow("flow-1", "add earbuds to cart", "Adds earbuds", listOf("query"), appName = "Amazon"))
+        val prompt = NluPrompt.build("add earbuds to my bag on myntra", candidates)
+        assertTrue(prompt.contains("learned on app: \"Amazon\""))
+        assertTrue(prompt.contains("targetApp"))
+    }
 }

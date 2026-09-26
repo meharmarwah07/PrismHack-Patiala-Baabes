@@ -48,6 +48,13 @@ class TeachPackageFilterTest {
     }
 
     @Test
+    fun `the on-screen keyboard's own events are excluded`() {
+        val gboard = "com.google.android.inputmethod.latin"
+        assertTrue(TeachPackageFilter.isExcluded(gboard, ownPackageName = own, launcherPackageName = launcher, keyboardPackageName = gboard))
+        assertFalse(TeachPackageFilter.isExcluded("com.zomato", ownPackageName = own, launcherPackageName = launcher, keyboardPackageName = gboard))
+    }
+
+    @Test
     fun `real target app package is never excluded`() {
         assertFalse(TeachPackageFilter.isExcluded("com.zomato", ownPackageName = own, launcherPackageName = launcher))
     }

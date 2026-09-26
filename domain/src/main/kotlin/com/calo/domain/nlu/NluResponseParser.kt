@@ -1,6 +1,7 @@
 package com.calo.domain.nlu
 
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
@@ -32,9 +33,8 @@ object NluResponseParser {
         val obj = runCatching { element.jsonObject }.getOrNull()
             ?: return MatchResult(matchedFlowId = null)
 
-        val matchedFlowId = obj["matchedFlowId"]?.let { el ->
-            if (el is JsonNull) null else (el as? JsonPrimitive)?.contentOrNull
-        }?.takeIf { it.isNotBlank() && it != "null" }
+        val matchedFlowId = optionalString(obj["matchedFlowId"])
+        val targetApp = optionalString(obj["targetApp"])
 
         val slotValues: Map<String, String> = obj["slotValues"]
             ?.let { runCatching { it.jsonObject }.getOrNull() }
@@ -54,8 +54,19 @@ object NluResponseParser {
         // the parser's point of view — NLUClient/orchestrator is responsible
         // for checking the id against the actual candidate list it sent, since
         // this parser has no access to that list and shouldn't need it.
-        return MatchResult(matchedFlowId = matchedFlowId, slotValues = slotValues, confidence = confidence)
+        return MatchResult(
+            matchedFlowId = matchedFlowId,
+            slotValues = slotValues,
+            confidence = confidence,
+            targetApp = targetApp
+        )
     }
+
+    /** Missing, JSON null, blank, or the literal string "null" all mean "not given". */
+    private fun optionalString(el: JsonElement?): String? =
+        el?.let { if (it is JsonNull) null else (it as? JsonPrimitive)?.contentOrNull }
+            ?.trim()
+            ?.takeIf { it.isNotBlank() && it != "null" }
 
     private fun stripMarkdownFence(raw: String): String {
         val trimmed = raw.trim()

@@ -74,4 +74,17 @@ class NluResponseParserTest {
         val raw = """{"matchedFlowId": "null", "slotValues": {}, "confidence": 0.0}"""
         assertNull(NluResponseParser.parse(raw).matchedFlowId)
     }
+
+    @Test
+    fun `parses a named target app`() {
+        val raw = """{"matchedFlowId": "flow-1", "slotValues": {}, "targetApp": "Myntra", "confidence": 0.9}"""
+        assertEquals("Myntra", NluResponseParser.parse(raw).targetApp)
+    }
+
+    @Test
+    fun `missing, null, or the string null target app all mean none named`() {
+        assertNull(NluResponseParser.parse("""{"matchedFlowId": "f"}""").targetApp)
+        assertNull(NluResponseParser.parse("""{"matchedFlowId": "f", "targetApp": null}""").targetApp)
+        assertNull(NluResponseParser.parse("""{"matchedFlowId": "f", "targetApp": "null"}""").targetApp)
+    }
 }

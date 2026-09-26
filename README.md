@@ -525,6 +525,69 @@ candidates on one screen) and its staleness/package guards actually
 triggering correctly have NOT been exercised on-device — only the
 single-match happy path has real evidence behind it.
 
+## Hybrid replay: exact recording + semantic layer (27 Sep 2026)
+
+Calo used to learn *the app*: each step was "tap this resource id / this
+text", so a flow only ever ran on the app it was taught on. It now also
+records what each step *means*, and uses that as a fallback on the same
+app and as the only path on a different app.
+
+- **Roles.** `FlowStep` gained `role: SemanticRole?` + `roleIndex`
+  (`OPEN_SEARCH`, `SEARCH_INPUT`, `SUBMIT_SEARCH`, `SELECT_RESULT`,
+  `ADD_TO_CART`, `BUY_NOW`, `GO_TO_CART`, `CHECKOUT`), and `ElementAnchor`
+  gained `hintText`. Both default to null, so flows already in Room decode
+  unchanged. `RoleLabeler` assigns roles at save time (and lazily at replay
+  for old flows) with deterministic keyword + sequence rules, not an LLM.
+  A step that fits no rule keeps `role = null`.
+- **Two replay modes** (`ReplayPlanner`, `ReplayMode`):
+  - `EXACT` (same app): taught anchor first, exactly as before. Only if it
+    isn't found does a step with a role fall back to `RoleMatcher`.
+  - `SEMANTIC` (different app): only steps with a role or slot run, each
+    grounded by `RoleMatcher` on a `ScreenElement` snapshot
+    (`NodeWalker.snapshot`). Steps with no known meaning are skipped. A flow
+    with no roles at all is refused up front.
+  - `RoleMatcher` returns `Ambiguous` instead of guessing (e.g. two "ADD"
+    buttons in a list), which becomes `Stuck` with "not sure what to tap".
+  - The credential gate still runs before every step in both modes, and
+    again after a pop-up is dismissed.
+- **Pop-ups.** On a miss, one attempt to tap a whole-label dismiss button
+  ("Not now", "Skip", "Close", …; never "Allow"/"Cancel"/"OK"), then retry.
+- **Search submit.** When no suggestion row matches, replay presses the
+  keyboard's action key (`ACTION_IME_ENTER`, Android 11+) and falls back to a
+  search button.
+- **Screen waits.** The fixed 400ms sleep is gone. After every action,
+  `ReplayEngine` waits until two reads 250ms apart show the same screen (max
+  4s), and `findNode` retries for up to 1.5s. Replay now runs off the main
+  thread.
+- **Picking the app.** The NLU prompt lists each flow's app and extracts a
+  `targetApp` ("…on Myntra"). The orchestrator resolves it to an installed
+  package by launcher label; a different package from the taught one means
+  `SEMANTIC` mode.
+- **Confidence.** A match below 0.6 now asks "Did you mean …?" in a dialog
+  before anything is tapped. The adb `VOICE_COMMAND` path refuses unless
+  `--ez confirm true` is passed.
+- **Teach survives a process kill.** `TeachCheckpoint` writes the steps to
+  `filesDir` on every change. When the service reconnects in a new process
+  within 30 min, teaching resumes with the recovered steps, and
+  `MainActivity.onResume` syncs the button. This addresses the 25 Sep
+  "teaching does not survive a normal-length session" finding.
+
+**What was verified:** `:domain:test` gives 129/129 (was 87). The 42 new
+tests are `RoleLabelerTest`, `RoleMatcherTest` (includes `PopupRules`),
+`SemanticReplayTest` (an Amazon-taught flow replayed on a Myntra-like
+screen, exact-mode never touching the matcher, gate halts in both modes,
+gate re-check after pop-up dismissal, ambiguity → Stuck with zero taps)
+and NLU `targetApp` parsing/prompt. All existing tests pass unchanged.
+`:app:assembleDebug` gives `BUILD SUCCESSFUL` against the real toolchain.
+**Still unverified on a device:** all of the `:app` side. That covers
+`NodeWalker.snapshot` against real Amazon/Myntra trees (the labels and
+`inList` detection the matcher depends on), `ACTION_IME_ENTER` on real
+search fields, the settle-wait timings, `resolvePackageForAppName` finding
+Myntra by label, the confirm dialog, and checkpoint resume after a real
+process kill. Test in that order: teach "search wireless earbuds and add the
+first result to cart" on Amazon, `DUMP_FLOWS` to confirm the roles, replay
+it on Amazon, then say "…on Myntra".
+
 ## Setup once this reaches a real machine
 
 1. Open in Android Studio (needs internet — this project's Gradle files

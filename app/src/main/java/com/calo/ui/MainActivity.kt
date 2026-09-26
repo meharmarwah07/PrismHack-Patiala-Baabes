@@ -120,7 +120,37 @@ class MainActivity : AppCompatActivity() {
         // onStatus can fire from a coroutine callback; CaloOrchestrator runs
         // its scope on Dispatchers.Main, but runOnUiThread costs nothing and
         // keeps this correct even if that changes.
-        orchestrator.startVoiceCommand { status -> runOnUiThread { statusText.text = status } }
+        orchestrator.startVoiceCommand(
+            onStatus = { status -> runOnUiThread { statusText.text = status } },
+            onConfirm = { question, answer -> runOnUiThread { showConfirmDialog(question, answer) } }
+        )
+    }
+
+    /** Low-confidence match: the user decides before anything is tapped. */
+    private fun showConfirmDialog(question: String, answer: (Boolean) -> Unit) {
+        AlertDialog.Builder(this)
+            .setTitle(question)
+            .setCancelable(false)
+            .setPositiveButton(R.string.dialog_yes) { _, _ -> answer(true) }
+            .setNegativeButton(R.string.dialog_no) { _, _ -> answer(false) }
+            .show()
+    }
+
+    /**
+     * The service may have resumed an interrupted teaching session after a
+     * process restart (see TeachCheckpoint), or this activity may have been
+     * recreated mid-teach: show whatever the service is actually doing.
+     */
+    override fun onResume() {
+        super.onResume()
+        val teachingNow = CaloAccessibilityService.instance?.mode == CaloAccessibilityService.Mode.TEACHING
+        if (teachingNow != isTeaching) {
+            isTeaching = teachingNow
+            teachButton.text = getString(
+                if (teachingNow) R.string.action_finish_teaching else R.string.action_start_teaching
+            )
+            if (teachingNow) statusText.text = getString(R.string.status_teaching_active)
+        }
     }
 
     // ---- Bottom pill: teach / finish teaching --------------------------

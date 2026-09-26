@@ -7,18 +7,18 @@ import org.junit.Test
 class RawTouchCaptureGateTest {
 
     @Test
-    fun `clear screen, no keyboard - capture allowed`() {
-        assertTrue(RawTouchCaptureGate.isCaptureAllowed(credentialGateClear = true, keyboardVisible = false))
+    fun `clear screen, touch not on the keyboard - capture allowed`() {
+        assertTrue(RawTouchCaptureGate.isCaptureAllowed(credentialGateClear = true, touchOnKeyboard = false))
     }
 
     @Test
-    fun `CredentialGate-blocked screen - no coordinates recorded, keyboard hidden or not`() {
-        assertFalse(RawTouchCaptureGate.isCaptureAllowed(credentialGateClear = false, keyboardVisible = false))
-        assertFalse(RawTouchCaptureGate.isCaptureAllowed(credentialGateClear = false, keyboardVisible = true))
+    fun `CredentialGate-blocked screen - no coordinates recorded, on the keyboard or not`() {
+        assertFalse(RawTouchCaptureGate.isCaptureAllowed(credentialGateClear = false, touchOnKeyboard = false))
+        assertFalse(RawTouchCaptureGate.isCaptureAllowed(credentialGateClear = false, touchOnKeyboard = true))
     }
 
     @Test
-    fun `keyboard visible - no coordinates recorded even on an otherwise-clear screen`() {
-        assertFalse(RawTouchCaptureGate.isCaptureAllowed(credentialGateClear = true, keyboardVisible = true))
+    fun `touch on the keyboard - never recorded, even on an otherwise-clear screen`() {
+        assertFalse(RawTouchCaptureGate.isCaptureAllowed(credentialGateClear = true, touchOnKeyboard = true))
     }
 }

@@ -54,9 +54,17 @@ class DebugTriggerReceiver : BroadcastReceiver() {
                     return
                 }
                 Log.i(TAG, "Simulating voice command (debug, real Groq call): \"$utterance\"")
-                service.orchestrator.handleUtterance(utterance) { status ->
-                    Log.i(TAG, "Voice command result: $status")
-                }
+                // No UI to ask "did you mean...?" over adb: pass --ez confirm true
+                // to auto-accept a low-confidence match, otherwise it's refused.
+                val autoConfirm = intent.getBooleanExtra("confirm", false)
+                service.orchestrator.handleUtterance(
+                    utterance,
+                    onStatus = { status -> Log.i(TAG, "Voice command result: $status") },
+                    onConfirm = if (autoConfirm) { question, answer ->
+                        Log.i(TAG, "Auto-confirming (debug): $question")
+                        answer(true)
+                    } else null
+                )
             }
 
             ACTION_SET_TOUCH_EXPLORATION -> {
