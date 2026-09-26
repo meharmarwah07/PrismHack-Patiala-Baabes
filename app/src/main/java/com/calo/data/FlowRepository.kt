@@ -19,4 +19,6 @@ class FlowRepository(context: Context) {
     suspend fun all(): List<LearnedFlow> = dao.getAll()
 
     suspend fun delete(flow: LearnedFlow) = dao.delete(flow)
+
+    suspend fun deleteAll() = dao.deleteAll()
 }

@@ -629,7 +629,7 @@ class TeachRecorder(
      */
     private fun refreshGoodRootCache(root: AccessibilityNodeInfo?) {
         if (root == null) return
-        if (countVisibleTextNodes(root) > MIN_VISIBLE_TEXT_NODES_FOR_REAL_ROOT) {
+        if (countVisibleTextNodes(root, limit = MIN_VISIBLE_TEXT_NODES_FOR_REAL_ROOT + 1) > MIN_VISIBLE_TEXT_NODES_FOR_REAL_ROOT) {
             goodRootHistory.addFirst(CachedRoot(root, System.currentTimeMillis(), root.packageName?.toString()))
             while (goodRootHistory.size > GOOD_ROOT_HISTORY_SIZE) {
                 goodRootHistory.removeLast().root.recycle()
@@ -639,12 +639,31 @@ class TeachRecorder(
         }
     }
 
-    /** Counts nodes under (and including) [node] with non-blank text or contentDescription. Recycles every child it obtains; never recycles [node] itself (borrowed, same convention as NodeWalker). */
-    private fun countVisibleTextNodes(node: AccessibilityNodeInfo): Int {
+    /**
+     * Counts nodes under (and including) [node] with non-blank text or
+     * contentDescription, up to [limit] — never more than that, even if the
+     * real count is much higher. Recycles every child it obtains; never
+     * recycles [node] itself (borrowed, same convention as NodeWalker).
+     *
+     * Confirmed on-device (2026-09-26, real ANR — full dropbox trace
+     * pulled): the original unbounded version walked the ENTIRE tree via
+     * AccessibilityNodeInfo.getChild(), which is a Binder round-trip PER
+     * NODE — on Zomato's large, Compose-heavy home screen (carousels,
+     * recommendation grids) this froze the main thread long enough for the
+     * system to ANR-kill the whole process. The only caller ever checks
+     * "is this > MIN_VISIBLE_TEXT_NODES_FOR_REAL_ROOT" (a single-digit
+     * threshold), so counting into the hundreds was always wasted work —
+     * this stops descending the instant [limit] is reached. Still visits
+     * (and recycles) every DIRECT child at whatever level it stops at, so
+     * no node is ever leaked; it just stops recursing deeper.
+     */
+    private fun countVisibleTextNodes(node: AccessibilityNodeInfo, limit: Int): Int {
         var count = if (!node.text.isNullOrBlank() || !node.contentDescription.isNullOrBlank()) 1 else 0
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
-            count += countVisibleTextNodes(child)
+            if (count < limit) {
+                count += countVisibleTextNodes(child, limit - count)
+            }
             child.recycle()
         }
         return count

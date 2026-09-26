@@ -60,6 +60,7 @@
                 <action android:name="com.calo.debug.SET_TOUCH_EXPLORATION" />
                 <action android:name="com.calo.debug.DUMP_FLOWS" />
                 <action android:name="com.calo.debug.DELETE_FLOWS_BY_ID" />
+                <action android:name="com.calo.debug.DEBUG_RESET" />
             </intent-filter>
         </receiver>
 

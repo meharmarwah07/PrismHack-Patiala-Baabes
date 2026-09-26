@@ -22,4 +22,9 @@ interface FlowDao {
 
     @Delete
     suspend fun delete(flow: LearnedFlow)
+
+    // DEBUG_RESET tooling (2026-09-26): wipes every saved flow, for a clean
+    // re-teach without stale/junk data from earlier debugging sessions.
+    @Query("DELETE FROM learned_flows")
+    suspend fun deleteAll()
 }
