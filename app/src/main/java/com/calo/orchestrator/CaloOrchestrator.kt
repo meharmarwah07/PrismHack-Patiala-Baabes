@@ -83,6 +83,20 @@ class CaloOrchestrator(context: Context) {
                 )
             }
 
+            // Closes the dead-air gap during the NLU round-trip (observed
+            // 0.5-12s) — silence for that long reads as broken on camera
+            // for the demo video. Mirrors the onStatus("Thinking about
+            // that...") cue Lane C added in their own CaloOrchestrator on
+            // lane-c-nlu (that branch has otherwise diverged significantly
+            // here — ambiguity resolution, missing-slot prompts — so this
+            // is a same-purpose addition on this branch, not a merge of
+            // theirs; whoever reconciles the branches will hit this same
+            // line twice). The spoken cue is shorter than the shown status
+            // text on purpose: the TTS engine's own startup latency eats
+            // into the exact window this is meant to cover.
+            onStatus("Thinking about that...")
+            tts.speak("Thinking...")
+
             val match = nluClient.match(utterance, candidates)
             // Logged separately from the user-facing status below on
             // purpose: this is the ONLY place the raw NLU decision
