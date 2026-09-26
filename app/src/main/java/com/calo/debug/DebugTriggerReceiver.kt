@@ -17,6 +17,7 @@ class DebugTriggerReceiver : BroadcastReceiver() {
         const val ACTION_SET_TOUCH_EXPLORATION = "com.calo.debug.SET_TOUCH_EXPLORATION"
         const val ACTION_DUMP_FLOWS = "com.calo.debug.DUMP_FLOWS"
         const val ACTION_DELETE_FLOWS_BY_ID = "com.calo.debug.DELETE_FLOWS_BY_ID"
+        const val ACTION_DEBUG_RESET = "com.calo.debug.DEBUG_RESET"
     }
 
     override fun onReceive(context: Context, intent: Intent) {
@@ -67,6 +68,10 @@ class DebugTriggerReceiver : BroadcastReceiver() {
             ACTION_DELETE_FLOWS_BY_ID -> {
                 val ids = intent.getStringExtra("ids")?.split(",")?.map { it.trim() }?.toSet() ?: emptySet()
                 service.orchestrator.deleteFlowsByIds(ids) { result -> Log.i(TAG, result) }
+            }
+
+            ACTION_DEBUG_RESET -> {
+                service.orchestrator.debugResetAllFlows { result -> Log.i(TAG, result) }
             }
 
             ACTION_DUMP_FLOWS -> {

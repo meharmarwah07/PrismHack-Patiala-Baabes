@@ -391,6 +391,14 @@ class CaloOrchestrator(context: Context) {
         }
     }
 
+    /** DEBUG_RESET tooling (2026-09-26): wipes every saved flow for a clean re-teach, no stale/junk data from earlier debugging. */
+    fun debugResetAllFlows(onResult: (String) -> Unit) {
+        scope.launch {
+            repository.deleteAll()
+            onResult("All flows wiped.")
+        }
+    }
+
     fun shutdown() {
         job.cancel()
         voice.destroy()
