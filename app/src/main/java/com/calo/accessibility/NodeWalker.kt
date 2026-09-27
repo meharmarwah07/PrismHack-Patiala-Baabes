@@ -30,6 +30,22 @@ class NodeWalker {
         const val MAX_SNAPSHOT_NODES = 1500
         const val MAX_LABEL_PARTS = 6
         const val MAX_LABEL_CHARS = 300
+
+        // findClickableAtPoint only prunes RECURSION depth (skips descending
+        // into a child whose bounds don't contain the touch point) — it still
+        // pays one getChild() Binder round-trip per SIBLING at every level on
+        // the containment path, to read that sibling's own bounds first. On a
+        // wide container (a flattened list/grid — confirmed on Zomato's home
+        // screen, same shape as the countVisibleTextNodes ANR fixed 26 Sep),
+        // that's hundreds of Binder calls for one touch. Caps total getChild()
+        // calls across the whole walk so one touch can't run away; a real
+        // touch's containment path only ever needs a small fraction of this
+        // in practice. Trades a theoretical miss (an overlapping sibling
+        // found only after the budget runs out) for a bounded worst case —
+        // acceptable since Compose views overlapping at the exact same point
+        // as another clickable sibling are rare, and unresolved is a smaller
+        // failure than multi-second-and-climbing input lag.
+        const val MAX_CHILD_LOOKUPS_PER_TOUCH = 200
     }
 
     fun resolve(root: AccessibilityNodeInfo?, anchor: ElementAnchor): AccessibilityNodeInfo? {
@@ -278,6 +294,7 @@ class NodeWalker {
         val nodes = mutableListOf<AccessibilityNodeInfo>()
         val candidates = mutableListOf<BoundsAtPointResolver.Candidate>()
         val rect = Rect()
+        var childLookupBudget = MAX_CHILD_LOOKUPS_PER_TOUCH
 
         fun walk(node: AccessibilityNodeInfo, isRoot: Boolean) {
             node.getBoundsInScreen(rect)
@@ -292,6 +309,14 @@ class NodeWalker {
                 // instead took up to 1.5s on Zomato (27 Sep 2026) — long
                 // enough for the screen to change before it finished.
                 for (i in 0 until node.childCount) {
+                    // Depth pruning above doesn't bound WIDTH: every sibling
+                    // still costs one getChild() Binder call just to read its
+                    // bounds. Confirmed on-device (Mehar's phone, 27 Sep
+                    // 2026) that this alone took multiple seconds on Zomato's
+                    // home screen once IPC latency was elevated — see the
+                    // budget's own doc.
+                    if (childLookupBudget <= 0) break
+                    childLookupBudget--
                     val child = node.getChild(i) ?: continue
                     walk(child, isRoot = false)
                 }
