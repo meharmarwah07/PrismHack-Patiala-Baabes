@@ -901,6 +901,21 @@ class TeachRecorder(
     }
 
     /**
+     * Cheap staleness check for [token], read from [touchWorker]'s queue
+     * BEFORE paying for the expensive element lookup (resolveTouchAnchor).
+     * Confirmed on-device (27 Sep 2026): touchWorker is single-threaded, and
+     * that lookup alone can take multiple seconds under load — tapping
+     * again while one is still in flight (a completely natural reaction
+     * when nothing seems to happen) queues the new touch behind it rather
+     * than racing it. [offerRawTouch] already discards a resolved-but-stale
+     * result the same way; this just skips the wasted work for a touch that
+     * was going to be thrown away anyway, so the queue can catch up to
+     * whichever touch is actually current instead of resolving every
+     * superseded one in full, one at a time.
+     */
+    fun isLatestTouch(token: Long): Boolean = token == touchSeq
+
+    /**
      * Step 2, on a BACKGROUND thread: works out which element is under
      * ([x], [y]) and builds its anchor. Reads no recorder state and changes
      * none, so it's safe off the main thread. Null if the touch shouldn't

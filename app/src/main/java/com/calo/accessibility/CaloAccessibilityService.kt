@@ -580,6 +580,16 @@ class CaloAccessibilityService : AccessibilityService() {
         gestureNotTap = false
 
         touchWorker.execute {
+            // Confirmed on-device (27 Sep 2026): touchWorker is single-
+            // threaded, and the element lookup below can take multiple
+            // seconds under load. Tapping again while one is still queued
+            // (a natural reaction when nothing seems to happen) used to
+            // still pay for a full lookup on this now-superseded touch
+            // before even checking it was already stale — wasting the
+            // exact time budget needed to catch up to the touch that
+            // actually matters. Bail out first, cheaply, before doing any
+            // of that work.
+            if (!recorder.isLatestTouch(token)) return@execute
             val root = currentRoot()
             try {
                 // Element lookup first — it's the part racing the screen
