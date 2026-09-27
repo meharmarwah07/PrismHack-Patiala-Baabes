@@ -88,6 +88,13 @@ class CaloAccessibilityService : AccessibilityService() {
     private val touchWorker = java.util.concurrent.Executors.newSingleThreadExecutor()
     private var lastTouchUpAtMs = 0L
 
+    // Diagnostic-only (27 Sep 2026, tap-freeze investigation): tracks how
+    // many tap-resolution jobs are submitted-but-not-yet-fully-finished on
+    // [touchWorker] at any moment, purely for the structured timing record
+    // in handleRawTouchDown — not used for any control-flow decision.
+    private val touchQueueDepth = java.util.concurrent.atomic.AtomicInteger(0)
+    private val tapIdCounter = java.util.concurrent.atomic.AtomicLong(0)
+
     // The current finger gesture, to tell a tap from a swipe/long-press.
     private var gestureToken: Long? = null
     private var gestureDownX = 0f
@@ -470,8 +477,22 @@ class CaloAccessibilityService : AccessibilityService() {
                 // and buttons needed a second tap. requestDelegating() is
                 // only a valid transition from STATE_TOUCH_INTERACTING —
                 // calling it in STATE_DELEGATING throws (see below).
-                if (controller.state == TouchInteractionController.STATE_TOUCH_INTERACTING) {
+                // Diagnostic-only (27 Sep 2026): state read immediately
+                // before and after the delegation request, for the tap-
+                // freeze investigation's structured timing record — answers
+                // whether requestDelegating() is even being called, and
+                // whether the state reflects the change synchronously.
+                val stateBeforeDelegating = controller.state
+                if (stateBeforeDelegating == TouchInteractionController.STATE_TOUCH_INTERACTING) {
                     controller.requestDelegating()
+                }
+                val stateAfterDelegating = controller.state
+                if (BuildConfig.DEBUG && event.actionMasked == MotionEvent.ACTION_DOWN) {
+                    android.util.Log.d(
+                        "CaloTapTiming",
+                        "delegation stateBefore=${TouchInteractionController.stateToString(stateBeforeDelegating)} " +
+                            "stateAfter=${TouchInteractionController.stateToString(stateAfterDelegating)}"
+                    )
                 }
                 // Idle-based, not "5 minutes from teach start": a real
                 // teach session pauses (reading a menu, deciding what to
@@ -489,7 +510,7 @@ class CaloAccessibilityService : AccessibilityService() {
                     )
                 }
                 if (event.actionMasked == MotionEvent.ACTION_DOWN) {
-                    handleRawTouchDown(event.rawX, event.rawY)
+                    handleRawTouchDown(event.rawX, event.rawY, stateBeforeDelegating)
                 }
                 if (event.actionMasked == MotionEvent.ACTION_MOVE) {
                     trackGestureMove(event.rawX, event.rawY)
@@ -564,7 +585,7 @@ class CaloAccessibilityService : AccessibilityService() {
      * The commit happens RAW_TOUCH_COMMIT_DELAY_MS after the finger lifts
      * (or RAW_TOUCH_NO_UP_TIMEOUT_MS after it went down, if no lift is seen).
      */
-    private fun handleRawTouchDown(rawX: Float, rawY: Float) {
+    private fun handleRawTouchDown(rawX: Float, rawY: Float, controllerStateBefore: Int) {
         val recorder = teachRecorder ?: return
         // A new touch means the previous tap is over: save it now rather
         // than drop it. Confirmed on-device (27 Sep): a checkout tap was
@@ -579,7 +600,21 @@ class CaloAccessibilityService : AccessibilityService() {
         gestureMaxDistance = 0f
         gestureNotTap = false
 
+        // Diagnostic-only (27 Sep 2026, tap-freeze investigation): one
+        // structured record per tap, per Step 1 of the instrumentation
+        // plan. All nanoTime() reads and the eventual log call are
+        // unconditional-cost-free when not BuildConfig.DEBUG (a few field
+        // writes), and formatting/logging happens exactly once, after
+        // resolution is fully done — never inline mid-measurement, so the
+        // instrumentation itself can't inflate what it's measuring.
+        val tapId = tapIdCounter.incrementAndGet()
+        val submittedAtNanos = System.nanoTime()
+        val queueDepthAtArrival = touchQueueDepth.incrementAndGet()
+
         touchWorker.execute {
+            val startedAtNanos = System.nanoTime()
+            val queueDepthAtStart = touchQueueDepth.get()
+            val threadName = Thread.currentThread().name
             // Confirmed on-device (27 Sep 2026): touchWorker is single-
             // threaded, and the element lookup below can take multiple
             // seconds under load. Tapping again while one is still queued
@@ -589,23 +624,42 @@ class CaloAccessibilityService : AccessibilityService() {
             // exact time budget needed to catch up to the touch that
             // actually matters. Bail out first, cheaply, before doing any
             // of that work.
-            if (!recorder.isLatestTouch(token)) return@execute
+            if (!recorder.isLatestTouch(token)) {
+                touchQueueDepth.decrementAndGet()
+                return@execute
+            }
+            val rootAcquireStart = System.nanoTime()
             val root = currentRoot()
+            val rootAcquireNanos = System.nanoTime() - rootAcquireStart
             try {
                 // Element lookup first — it's the part racing the screen
                 // changing under it. The gate verdict is applied after.
                 val actionPackage = root?.packageName?.toString()
                 val touchOnKeyboard = isOnKeyboard(rawX.toInt(), rawY.toInt())
-                val candidate = recorder.resolveTouchAnchor(rawX.toInt(), rawY.toInt(), root, credentialGateClear = true, touchOnKeyboard = touchOnKeyboard)
+                val timing = if (BuildConfig.DEBUG) TapTiming() else null
+                val candidate = recorder.resolveTouchAnchor(rawX.toInt(), rawY.toInt(), root, credentialGateClear = true, touchOnKeyboard = touchOnKeyboard, timing = timing)
+                val credentialGateStart = System.nanoTime()
                 val credentialGateClear = candidate == null || credentialGate.check(root) is GateVerdict.Clear
+                val credentialGateNanos = System.nanoTime() - credentialGateStart
                 val anchor = candidate.takeIf { credentialGateClear }
                 if (BuildConfig.DEBUG) {
-                    android.util.Log.d("CaloTouchCapture", "touch resolved in ${System.currentTimeMillis() - downAtMs}ms x=${rawX.toInt()} y=${rawY.toInt()} pkg=$actionPackage gateClear=$credentialGateClear onKeyboard=$touchOnKeyboard -> anchor=$anchor")
+                    val totalResolutionMs = (System.nanoTime() - startedAtNanos) / 1_000_000.0
+                    android.util.Log.d(
+                        "CaloTapTiming",
+                        "tapId=$tapId thread=$threadName controllerStateBefore=${TouchInteractionController.stateToString(controllerStateBefore)} " +
+                            "queueWaitMs=${(startedAtNanos - submittedAtNanos) / 1_000_000.0} queueDepthAtArrival=$queueDepthAtArrival queueDepthAtStart=$queueDepthAtStart " +
+                            "rootAcquireMs=${rootAcquireNanos / 1_000_000.0} " +
+                            "boundsCalls=${timing?.boundsCalls ?: -1} boundsTotalMs=${(timing?.boundsTotalNanos ?: 0) / 1_000_000.0} " +
+                            "traversalMs=${(timing?.traversalNanos ?: 0) / 1_000_000.0} semanticCheckMs=${(timing?.semanticNanos ?: 0) / 1_000_000.0} " +
+                            "credentialGateMs=${credentialGateNanos / 1_000_000.0} totalResolutionMs=$totalResolutionMs " +
+                            "x=${rawX.toInt()} y=${rawY.toInt()} pkg=$actionPackage gateClear=$credentialGateClear onKeyboard=$touchOnKeyboard -> anchor=$anchor"
+                    )
                 }
                 handler.post { offerRawTouch(recorder, token, anchor, actionPackage, downAtMs) }
             } catch (e: Exception) {
                 android.util.Log.w("Calo", "Couldn't resolve raw touch", e)
             } finally {
+                touchQueueDepth.decrementAndGet()
                 root?.recycle()
             }
         }

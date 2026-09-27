@@ -23,6 +23,21 @@ import com.calo.domain.teach.BoundsAtPointResolver
  * recycled here — it's owned by whoever fetched rootInActiveWindow, and
  * this function only ever borrows it.
  */
+/**
+ * Diagnostic-only (27 Sep 2026): one mutable record per tap, filled in as
+ * resolution proceeds through NodeWalker/TeachRecorder/CaloAccessibilityService,
+ * then formatted and logged ONCE after the tap fully resolves — see the tap-
+ * freeze investigation this was added for. Never allocated/read off the
+ * single touchWorker thread that owns one tap's resolution at a time, so
+ * plain vars are fine (no synchronization needed).
+ */
+class TapTiming {
+    var boundsCalls = 0
+    var boundsTotalNanos = 0L
+    var traversalNanos = 0L
+    var semanticNanos = 0L
+}
+
 class NodeWalker {
 
     private companion object {
@@ -285,7 +300,7 @@ class NodeWalker {
      * button that way. Empty bounds (`[0,0][0,0]`, unlaid-out Compose nodes)
      * never contain a touch point.
      */
-    fun findClickableAtPoint(root: AccessibilityNodeInfo?, x: Int, y: Int): AccessibilityNodeInfo? {
+    fun findClickableAtPoint(root: AccessibilityNodeInfo?, x: Int, y: Int, timing: TapTiming? = null): AccessibilityNodeInfo? {
         if (root == null) return null
         // Smallest VISIBLE node under the point across the whole tree (see
         // BoundsAtPointResolver.smallestVisibleContaining for the on-device
@@ -297,7 +312,14 @@ class NodeWalker {
         var childLookupBudget = MAX_CHILD_LOOKUPS_PER_TOUCH
 
         fun walk(node: AccessibilityNodeInfo, isRoot: Boolean) {
-            node.getBoundsInScreen(rect)
+            if (timing != null) {
+                val start = System.nanoTime()
+                node.getBoundsInScreen(rect)
+                timing.boundsCalls++
+                timing.boundsTotalNanos += System.nanoTime() - start
+            } else {
+                node.getBoundsInScreen(rect)
+            }
             val bounds = BoundsAtPointResolver.Bounds(rect.left, rect.top, rect.right, rect.bottom)
             val keep = bounds.contains(x, y)
             if (keep) {

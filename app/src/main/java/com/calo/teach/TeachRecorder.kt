@@ -4,6 +4,7 @@ import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.calo.accessibility.NodeWalker
+import com.calo.accessibility.TapTiming
 import com.calo.domain.model.ActionType
 import com.calo.domain.model.ElementAnchor
 import com.calo.domain.model.FlowStep
@@ -927,14 +928,21 @@ class TeachRecorder(
         y: Int,
         root: AccessibilityNodeInfo?,
         credentialGateClear: Boolean,
-        touchOnKeyboard: Boolean
+        touchOnKeyboard: Boolean,
+        timing: TapTiming? = null
     ): ElementAnchor? {
         if (root == null) return null
         if (TeachPackageFilter.isExcluded(root.packageName?.toString(), ownPackageName, launcherPackageName, keyboardPackageName)) return null
         if (!RawTouchCaptureGate.isCaptureAllowed(credentialGateClear, touchOnKeyboard)) return null
-        val node = nodeWalker.findClickableAtPoint(root, x, y) ?: return null
+        val traversalStart = System.nanoTime()
+        val node = nodeWalker.findClickableAtPoint(root, x, y, timing)
+        timing?.let { it.traversalNanos = System.nanoTime() - traversalStart }
+        if (node == null) return null
         return try {
-            anchorWithDescendantTextFallback(node)
+            val semanticStart = System.nanoTime()
+            val result = anchorWithDescendantTextFallback(node)
+            timing?.let { it.semanticNanos = System.nanoTime() - semanticStart }
+            result
         } finally {
             node.recycle()
         }
