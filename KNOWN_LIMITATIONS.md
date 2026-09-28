@@ -1,4 +1,4 @@
-# Calo — known limitations (23 Sep 2026, updated 25 Sep 2026, updated 28 Sep 2026)
+# Calo — known limitations (23 Sep 2026, updated 25 Sep 2026, updated 28 Sep 2026 x2)
 
 ## 28 Sep 2026 — a timed-out action step is not guaranteed cancelled
 
@@ -33,6 +33,18 @@ blocked native IPC call from the JVM side. Treat "a taught flow occasionally
 performs one extra, unrequested tap/type/scroll after reporting Stuck, on a
 device/screen combination slow enough to hit the 5000ms timeout" as a real,
 accepted residual risk, not a hypothetical.
+
+## 28 Sep 2026 (verification pass) — teach-session process-kill resume: core mechanism confirmed working; one new gap found
+
+Verified on-device (Realme CPH2381, `integration-test` @ e1445ce), two separate teach -> kill -> resume -> continue -> finish cycles, using `run-as com.calo kill -9 <pid>` (plain `adb shell am kill` is a no-op against this service's process class -- it only targets killable/cached-tier processes, and an accessibility service's bound process isn't one; don't waste time re-testing with it).
+
+**Confirmed fixed, closing the 25 Sep entry below for its original scope:** `TeachCheckpoint` persistence, step/targetPackage recovery, and `MainActivity` UI reconciliation all work correctly across a real process kill mid-teach. Checkpoint file matched actual taught steps exactly both runs (19/19, 5/5), the resume log line reported the correct recovered count both times, the UI correctly showed "Finish Teaching"/teaching-active immediately after resume (not "Start Teaching"), and the final saved flow's step order was intact across the kill boundary with no drops or duplicates. The 25 Sep entry's original failure mode (silent total session loss) is closed.
+
+**New gap found, not yet fixed:** raw touch capture (`TouchInteractionController`, the Finding-6 fallback that recovers taps Android misclassifies as SCROLL instead of CLICK) registered cleanly after both resumes (`registered, initial state=STATE_CLEAR`) but delivered zero `onMotionEvent` callbacks after one of the two resumes -- confirmed against two separate real taps, 46s and 3+ minutes after that resume, both landing as `Dropped CLICK with no unclaimed finger touch behind it`. The other resume in the same session worked fine (`onMotionEvent` fired normally), so this is intermittent, not a guaranteed break -- but it's real, directly evidenced, and silent (no user-visible error; the recorder pipeline itself stays alive and keeps appending SCROLL steps normally, so nothing *looks* broken).
+
+**Compounding risk:** Finding 6 (real taps landing as `TYPE_VIEW_SCROLLED` instead of `TYPE_VIEW_CLICKED`) is still live as of tonight -- reproduced during this same verification pass on Zomato. Raw touch capture is the safety net for exactly that misclassification. A demo session that (a) gets process-killed mid-teach, (b) resumes into this touch-capture-silently-dead state, and (c) then hits Finding 6 on a real tap will silently lose that tap with nothing telling anyone it happened.
+
+**Decision (28 Sep, time-constrained before freeze):** documenting rather than fixing tonight. This is a narrow, three-condition compound failure in an already-fragile subsystem (see this file's own history of touch-capture races); a rushed fix here risks trading a known, low-probability, silent failure for a new, unknown one, and reliable reproduction wasn't achieved even across two attempts tonight (1/2). Revisit post-freeze with dedicated reproduction time, not as a last-minute patch.
 
 ## 25 Sep 2026 — live-device T1 test session findings
 
