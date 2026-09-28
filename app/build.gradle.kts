@@ -62,6 +62,16 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+
+    // Hackathon submission: judges sideload the release APK directly, so it
+    // just needs to be signed, not distributed via Play Store. Reusing the
+    // debug signing config for release is standard for this case — no
+    // dedicated release keystore needed.
+    buildTypes {
+        release {
+            signingConfig = signingConfigs.getByName("debug")
+        }
+    }
 }
 
 dependencies {
