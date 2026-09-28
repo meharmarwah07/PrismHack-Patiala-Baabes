@@ -15,7 +15,13 @@ import com.calo.domain.replay.NodeProvider
 import com.calo.domain.replay.ReplayPlanner
 import com.calo.domain.replay.ReplayResult
 
-private class AndroidNodeHandle(val node: AccessibilityNodeInfo) : NodeHandle
+// requiredClimb: true when NodeWalker had to climb from the actually-matched
+// node to a clickable ANCESTOR (see NodeWalker.ResolvedMatch) — a guess
+// about which container owns the real click behavior, as opposed to a
+// direct hit on a node that was already clickable/editable/scrollable.
+// Defaults false for handles from findNodeByValue (slot-driven CLICK
+// search), which has no equivalent "matched vs climbed" distinction.
+private class AndroidNodeHandle(val node: AccessibilityNodeInfo, val requiredClimb: Boolean = false) : NodeHandle
 
 /**
  * :app's implementation of the domain [NodeProvider] interface — the one
@@ -176,8 +182,8 @@ class ReplayEngine(
     }
 
     override fun findNode(anchor: ElementAnchor): NodeHandle? {
-        val node = nodeWalker.resolve(takeCachedRootOrFetch(), anchor) ?: return null
-        return AndroidNodeHandle(node)
+        val match = nodeWalker.resolve(takeCachedRootOrFetch(), anchor) ?: return null
+        return AndroidNodeHandle(match.node, match.requiredClimb)
     }
 
     override fun findNodeByValue(value: String): NodeHandle? {
@@ -188,12 +194,47 @@ class ReplayEngine(
     override fun awaitScreenChange() = waitForStableScreen()
 
     override fun performClick(node: NodeHandle): Boolean {
-        val info = (node as AndroidNodeHandle).node
+        val handle = node as AndroidNodeHandle
+        val info = handle.node
         stepCounter++
-        fingerprintBeforeAction = screenFingerprint()
+        val before = screenFingerprint()
+        fingerprintBeforeAction = before
         Log.i(TAG, "Replay step $stepCounter: CLICK target=${describe(info)}")
         var ok = info.performAction(AccessibilityNodeInfo.ACTION_CLICK)
         Log.i(TAG, "Replay step $stepCounter: CLICK result=$ok")
+        if (ok && handle.requiredClimb) {
+            // Confirmed on-device (2026-09-29, Zomato): performAction(ACTION_
+            // CLICK) can report true while doing nothing — some views handle
+            // taps via custom touch/gesture logic instead of a real
+            // OnClickListener, and Android's accessibility layer doesn't
+            // reliably distinguish "dispatched" from "actually did the
+            // thing". A real replay reported this step's CLICK as
+            // successful, then Done. for the whole flow, while silently
+            // never leaving the search-results screen — traced to exactly
+            // this: NodeWalker had to climb from the matched (non-clickable)
+            // text node to a clickable ANCESTOR, and THAT ancestor accepted
+            // the action without it doing anything.
+            //
+            // Only checked when handle.requiredClimb — a DIRECT hit (the
+            // matched node was already clickable/editable/scrollable) has no
+            // such ambiguity and shouldn't pay this extra wait. Deliberately
+            // fails closed (Stuck) rather than retrying via the coordinate-
+            // tap fallback below: that fallback exists for when the action
+            // is KNOWN to have failed (ok=false), but here the OS claims it
+            // succeeded — retrying anyway risks a genuine double-fire on
+            // some OTHER click that legitimately doesn't change the screen
+            // (a toggle, add-to-cart), which this heuristic has no way to
+            // tell apart from "climbed ancestor did nothing". Matches this
+            // project's fail-closed philosophy everywhere else (CredentialGate,
+            // dedup, click-value ambiguity, post-typing-tap resolution): a
+            // click we can't verify actually worked is safer treated as
+            // failed than risked as a silent wrong "success" or double-fired.
+            if (!waitForFingerprintChange(before)) {
+                Log.w(TAG, "Replay step $stepCounter: CLICK reported success on a climbed-to ancestor but the screen never changed — treating as failed, not retrying")
+                info.recycle()
+                return false
+            }
+        }
         if (!ok) {
             // Some elements only react to a real touch. Tap its centre.
             val bounds = android.graphics.Rect()
@@ -266,6 +307,23 @@ class ReplayEngine(
     }
 
     /**
+     * Polls until [screenFingerprint] differs from [before], up to
+     * MAX_CHANGE_WAIT_MS. Returns whether it actually changed — shared by
+     * [waitForStableScreen] (which doesn't otherwise care, it moves on to
+     * the settle-poll either way) and [performClick]'s climbed-ancestor
+     * verification (which does: no change there means CLICK's reported
+     * success can't be trusted — see its own comment).
+     */
+    private fun waitForFingerprintChange(before: Int): Boolean {
+        val changeDeadline = System.currentTimeMillis() + MAX_CHANGE_WAIT_MS
+        while (System.currentTimeMillis() < changeDeadline) {
+            if (screenFingerprint() != before) return true
+            Thread.sleep(SETTLE_POLL_MS / 2)
+        }
+        return screenFingerprint() != before
+    }
+
+    /**
      * Confirmed on-device (Zomato, 27 Sep 2026): the next step started
      * 0.6s after a tap that opened a new page, because the OLD page was
      * still perfectly still for two polls before navigation began. So
@@ -276,10 +334,7 @@ class ReplayEngine(
         val before = fingerprintBeforeAction
         fingerprintBeforeAction = null
         if (before != null) {
-            val changeDeadline = System.currentTimeMillis() + MAX_CHANGE_WAIT_MS
-            while (System.currentTimeMillis() < changeDeadline && screenFingerprint() == before) {
-                Thread.sleep(SETTLE_POLL_MS / 2)
-            }
+            waitForFingerprintChange(before)
         }
         Thread.sleep(MIN_SETTLE_MS)
         val deadline = System.currentTimeMillis() + MAX_SETTLE_MS

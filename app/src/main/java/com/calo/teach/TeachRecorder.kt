@@ -226,11 +226,32 @@ class TeachRecorder(
             // handling afterwards (it usually IS a valid signal on its own,
             // just not one TeachRecorder otherwise acts on — see the `when`
             // block's `else -> Unit`).
-            tryResolvePostTypingTap(currentRoot, eventPackage)
+            val postTypingAttempt = tryResolvePostTypingTap(currentRoot, eventPackage)
             if (lastTextEntryStepIndex != null) {
                 // Still nothing recorded for whatever left the typing screen.
                 if (keyboardVisible) {
                     navAfterTypingAtMs = System.currentTimeMillis() // decided when the keyboard hides
+                } else if (postTypingAttempt == PostTypingTapAttempt.AMBIGUOUS) {
+                    // Confirmed on-device (2026-09-29, Zomato): Ambiguous
+                    // means PostTypingTapResolver found SEVERAL pre-tap
+                    // candidates on the new screen — its own doc calls this
+                    // "evidence a tap happened", the opposite of "nothing
+                    // happened, so this must have been a real search
+                    // submit". Falling through to recordSubmitAfterTyping
+                    // here (the old behavior) recorded a SUBMIT_SEARCH step
+                    // that never happened — replay then performs a REAL
+                    // ACTION_IME_ENTER submission, landing on the search
+                    // RESULTS page instead of wherever the real (unresolved)
+                    // tap actually navigated to, so the next taught step's
+                    // anchor (captured on that different, real destination
+                    // screen) doesn't exist there and resolves to the wrong
+                    // element. Fail closed the same way the ambiguous match
+                    // itself already does: record nothing rather than a
+                    // wrong action.
+                    Log.w(
+                        TAG,
+                        "Skipping SUBMIT_SEARCH inference after an ambiguous post-typing tap — a real navigation likely happened but couldn't be resolved to one element; recording nothing is safer than a wrong action"
+                    )
                 } else {
                     recordSubmitAfterTyping(eventPackage, "new screen after typing")
                 }
@@ -841,22 +862,32 @@ class TeachRecorder(
      * which climbs to the nearest clickable ancestor) and becomes a CLICK
      * step; zero or several matches fail closed, logged, nothing recorded.
      */
-    private fun tryResolvePostTypingTap(newRoot: AccessibilityNodeInfo?, actionPackage: String?) {
-        val hideAtMs = lastKeyboardHideAtMs ?: return
-        lastKeyboardHideAtMs = null // one attempt per keyboard-hide, regardless of outcome
-        if (lastTextEntryStepIndex == null) return
-        if (System.currentTimeMillis() - hideAtMs > POST_TYPING_TAP_WINDOW_MS) return
+    // Signal for the TYPE_WINDOW_STATE_CHANGED handler above: whether this
+    // call resolved a real CLICK, found no evidence of a tap at all (safe to
+    // still consider recordSubmitAfterTyping's "must have been a real
+    // submit" guess), found no evidence to act on because it never actually
+    // attempted a resolution this time, or found AMBIGUOUS evidence — the
+    // one case where recordSubmitAfterTyping must NOT run, since Ambiguous
+    // itself means a real tap likely happened (see PostTypingTapResolver's
+    // own doc), just not one this function could pin to a single element.
+    private enum class PostTypingTapAttempt { NOT_ATTEMPTED, RESOLVED, NO_MATCH, AMBIGUOUS }
 
-        val preTapRoot = goodRootHistory.firstOrNull()?.root ?: return
+    private fun tryResolvePostTypingTap(newRoot: AccessibilityNodeInfo?, actionPackage: String?): PostTypingTapAttempt {
+        val hideAtMs = lastKeyboardHideAtMs ?: return PostTypingTapAttempt.NOT_ATTEMPTED
+        lastKeyboardHideAtMs = null // one attempt per keyboard-hide, regardless of outcome
+        if (lastTextEntryStepIndex == null) return PostTypingTapAttempt.NOT_ATTEMPTED
+        if (System.currentTimeMillis() - hideAtMs > POST_TYPING_TAP_WINDOW_MS) return PostTypingTapAttempt.NOT_ATTEMPTED
+
+        val preTapRoot = goodRootHistory.firstOrNull()?.root ?: return PostTypingTapAttempt.NOT_ATTEMPTED
         val newScreenTexts = nodeWalker.collectAllText(newRoot).toSet()
         val preTapCandidates = nodeWalker.collectAllText(preTapRoot)
 
-        when (val outcome = PostTypingTapResolver.resolve(newScreenTexts, preTapCandidates)) {
+        return when (val outcome = PostTypingTapResolver.resolve(newScreenTexts, preTapCandidates)) {
             is PostTypingTapResolver.Outcome.Matched -> {
                 val node = nodeWalker.findByValue(preTapRoot, outcome.text)
                 if (node == null) {
                     Log.w(TAG, "Post-typing tap: matched text \"${outcome.text}\" but couldn't re-resolve it to a node — dropped")
-                    return
+                    return PostTypingTapAttempt.NO_MATCH
                 }
                 val anchor = try {
                     anchorWithDescendantTextFallback(node, fallbackText = outcome.text)
@@ -870,11 +901,16 @@ class TeachRecorder(
                 steps += FlowStep(order = nextOrder++, action = ActionType.CLICK, target = anchor, recordedValue = null)
                 logIfLowConfidenceClick(anchor, "post-typing-tap resolution")
                 Log.i(TAG, "Committed Finding-6 post-typing-tap CLICK via title match: \"${outcome.text}\"")
+                PostTypingTapAttempt.RESOLVED
             }
-            PostTypingTapResolver.Outcome.NoMatch ->
+            PostTypingTapResolver.Outcome.NoMatch -> {
                 Log.w(TAG, "Post-typing tap: no title/header text on the new screen matched any pre-tap element — dropped, fail closed")
-            is PostTypingTapResolver.Outcome.Ambiguous ->
+                PostTypingTapAttempt.NO_MATCH
+            }
+            is PostTypingTapResolver.Outcome.Ambiguous -> {
                 Log.w(TAG, "Post-typing tap: ${outcome.matchedTexts.size} pre-tap elements shared the matched text (${outcome.matchedTexts}) — dropped, fail closed")
+                PostTypingTapAttempt.AMBIGUOUS
+            }
         }
     }
 

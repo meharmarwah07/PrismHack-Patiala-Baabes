@@ -64,26 +64,44 @@ class NodeWalker {
         const val MAX_CHILD_LOOKUPS_PER_TOUCH = 200
     }
 
-    fun resolve(root: AccessibilityNodeInfo?, anchor: ElementAnchor): AccessibilityNodeInfo? {
+    /**
+     * [requiredClimb]: true when the node NodeWalker actually matched
+     * (by resourceId/text/contentDescription/className) was not itself
+     * clickable/editable/scrollable, so [actionable] climbed to a clickable
+     * ANCESTOR instead — a guess about which container owns the real click
+     * behavior, distinct from a direct hit. See [ReplayEngine.performClick]
+     * for why this matters: `ACTION_CLICK` can report success on a climbed
+     * ancestor without doing anything (confirmed on-device, 2026-09-29,
+     * Zomato — see that function's own comment), and that's only worth
+     * verifying for the climbed case, not every click.
+     */
+    data class ResolvedMatch(val node: AccessibilityNodeInfo, val requiredClimb: Boolean)
+
+    private fun matched(node: AccessibilityNodeInfo, root: AccessibilityNodeInfo): ResolvedMatch {
+        val requiredClimb = !(node === root || node.isClickable || node.isEditable || node.isScrollable)
+        return ResolvedMatch(actionable(node, root), requiredClimb)
+    }
+
+    fun resolve(root: AccessibilityNodeInfo?, anchor: ElementAnchor): ResolvedMatch? {
         if (root == null) return null
 
         anchor.resourceId?.let { rid ->
             when (val p = pickAmong(root, anchor) { it.viewIdResourceName == rid }) {
-                is Pick.One -> return actionable(p.node, root)
+                is Pick.One -> return matched(p.node, root)
                 Pick.Refused -> return null
                 Pick.None -> Unit
             }
         }
         anchor.text?.let { text ->
             when (val p = pickAmong(root, anchor) { it.text?.toString() == text }) {
-                is Pick.One -> return actionable(p.node, root)
+                is Pick.One -> return matched(p.node, root)
                 Pick.Refused -> return null
                 Pick.None -> Unit
             }
         }
         anchor.contentDescription?.let { cd ->
             when (val p = pickAmong(root, anchor) { it.contentDescription?.toString() == cd }) {
-                is Pick.One -> return actionable(p.node, root)
+                is Pick.One -> return matched(p.node, root)
                 Pick.Refused -> return null
                 Pick.None -> Unit
             }
@@ -103,11 +121,34 @@ class NodeWalker {
             return null
         }
 
-        if (anchor.className != null) {
-            find(root) { node, indexInParent ->
-                node.className?.toString() == anchor.className &&
-                    (anchor.indexInParent == null || indexInParent == anchor.indexInParent)
-            }?.let { return it }
+        val anchorClassName = anchor.className
+        if (anchorClassName != null) {
+            // Confirmed on-device (2026-09-29, Zomato): this tier only ever
+            // runs for a bare anchor with NO resourceId/text/contentDescription
+            // at all (every stronger tier above already returned or fell
+            // through to the taughtLabel != null early-return, which itself
+            // exists for exactly this "don't guess" reason — see its own
+            // comment). Unlike every tier above, this used to grab the FIRST
+            // className+index match via `find()` with zero ambiguity check —
+            // a generic combination like FrameLayout+index 0 exists many
+            // times over in a typical screen, so "first in traversal order"
+            // is not "the taught element", it's whichever unrelated node
+            // happens to come first. Confirmed root cause of a real mis-tap:
+            // a taught FAB anchor (layout_holder_menu_fab, no text/
+            // contentDescription) resolved to an unrelated FrameLayout on the
+            // replay-time screen and, after performClick failed on it, the
+            // coordinate-fallback tap landed on the search bar instead.
+            // Routed through the same pickAmong the tiers above use so
+            // several matches fail closed (Stuck) instead of guessing —
+            // matches this project's fail-closed philosophy everywhere else
+            // (CredentialGate, dedup, click-value ambiguity, post-typing-tap
+            // resolution).
+            val matches = collectAllByClassNameAndIndex(root, anchorClassName, anchor.indexInParent)
+            when (val p = pickAmong(anchor, matches, root)) {
+                is Pick.One -> return matched(p.node, root)
+                Pick.Refused -> return null
+                Pick.None -> Unit
+            }
         }
         return null
     }
@@ -129,8 +170,15 @@ class NodeWalker {
         root: AccessibilityNodeInfo,
         anchor: ElementAnchor,
         predicate: (AccessibilityNodeInfo) -> Boolean
-    ): Pick {
-        val matches = collectAll(root, predicate)
+    ): Pick = pickAmong(anchor, collectAll(root, predicate), root)
+
+    /**
+     * Same disambiguation as above, over an already-collected [matches] list
+     * — the className+indexInParent tier needs per-child index while
+     * collecting (see [collectAllByClassNameAndIndex]), which a plain
+     * [predicate] can't express, so it collects separately and shares this.
+     */
+    private fun pickAmong(anchor: ElementAnchor, matches: List<AccessibilityNodeInfo>, root: AccessibilityNodeInfo): Pick {
         if (matches.isEmpty()) return Pick.None
         val contexts = if (matches.size > 1 && !anchor.contextLabel.isNullOrBlank()) {
             matches.map { contextLabelFor(it) }
@@ -141,10 +189,36 @@ class NodeWalker {
         val chosen = index?.let { matches[it] }
         matches.forEach { if (it !== chosen && it !== root) it.recycle() }
         if (chosen == null) {
-            android.util.Log.w("Calo", "${matches.size} elements match ${anchor.resourceId ?: anchor.text ?: anchor.contentDescription} but none is in the taught row \"${anchor.contextLabel}\"")
+            android.util.Log.w("Calo", "${matches.size} elements match ${anchor.resourceId ?: anchor.text ?: anchor.contentDescription ?: anchor.className} but none is in the taught row \"${anchor.contextLabel}\"")
             return Pick.Refused
         }
         return Pick.One(chosen)
+    }
+
+    /**
+     * Same shape as [collectAll], but tracks each node's index among its own
+     * parent's children (as [find]/[searchChildren] do) so it can filter on
+     * [indexInParent] the way the className+index tier needs — [collectAll]'s
+     * plain predicate has no way to see that.
+     */
+    private fun collectAllByClassNameAndIndex(
+        root: AccessibilityNodeInfo,
+        className: String,
+        indexInParent: Int?
+    ): List<AccessibilityNodeInfo> {
+        val found = mutableListOf<AccessibilityNodeInfo>()
+        fun walk(node: AccessibilityNodeInfo, myIndex: Int, isRoot: Boolean) {
+            val isMatch = node.className?.toString() == className &&
+                (indexInParent == null || myIndex == indexInParent)
+            if (isMatch) found += node
+            for (i in 0 until node.childCount) {
+                val child = node.getChild(i) ?: continue
+                walk(child, i, isRoot = false)
+            }
+            if (!isMatch && !isRoot) node.recycle()
+        }
+        walk(root, -1, isRoot = true)
+        return found
     }
 
     /**
@@ -179,7 +253,7 @@ class NodeWalker {
      * clickable ancestor. Only candidates that pass the threshold are kept
      * while walking; everything else is recycled on the way.
      */
-    private fun findFuzzy(root: AccessibilityNodeInfo, taughtLabel: String): AccessibilityNodeInfo? {
+    private fun findFuzzy(root: AccessibilityNodeInfo, taughtLabel: String): ResolvedMatch? {
         val labels = mutableListOf<String>()
         val nodes = mutableListOf<AccessibilityNodeInfo>()
 
@@ -201,7 +275,7 @@ class NodeWalker {
 
         val chosen = FuzzyLabel.bestUnique(taughtLabel, labels)?.let { nodes[it] }
         nodes.forEach { if (it !== chosen && it !== root) it.recycle() }
-        return chosen?.let { actionable(it, root) }
+        return chosen?.let { matched(it, root) }
     }
 
     /**

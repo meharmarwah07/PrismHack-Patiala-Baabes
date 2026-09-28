@@ -651,6 +651,105 @@ whatever search results happen to still exist. The fix itself is now
 verified against the actual failure mode reported ("does not run
 completely"), not just against unit tests.
 
+## Three more "does not run completely" bugs, found and fixed chasing the one above (29 Sep 2026, same night)
+
+Getting the settle-wait fix above to actually complete a real taught flow
+surfaced three further real bugs, each found by reading logs/screenshots
+from an actual failure, not guessed. All confirmed on-device, same
+Realme/ColorOS device.
+
+**1. A phantom `SUBMIT_SEARCH` step invented from an unresolved tap.**
+`TeachRecorder.tryResolvePostTypingTap()` (`Finding 6 fallback, part 2`)
+tries to resolve a tap made while the keyboard is up by matching pre-tap
+candidate text against the new screen; `PostTypingTapResolver.Outcome
+.Ambiguous` means several candidates matched — its own doc says this
+"is evidence a tap happened", the opposite of "nothing happened". The
+caller (`TeachRecorder.onAccessibilityEvent`'s `TYPE_WINDOW_STATE_CHANGED`
+branch) treated `Ambiguous` exactly like `NoMatch`, falling through to
+`recordSubmitAfterTyping()` either way — recording a `SUBMIT_SEARCH` step
+that never happened. At replay, that step performs a REAL
+`ACTION_IME_ENTER` submission, landing on a different screen than wherever
+the real (unresolved) tap actually went, so the next taught step's anchor
+— captured on that real, different destination — doesn't exist on the
+`SUBMIT_SEARCH`'d screen and mis-resolves. Fixed: `tryResolvePostTypingTap`
+now returns a `PostTypingTapAttempt` (`RESOLVED`/`NO_MATCH`/`AMBIGUOUS`/
+`NOT_ATTEMPTED`); `recordSubmitAfterTyping` is skipped specifically for
+`AMBIGUOUS`, logging instead of guessing. **Verified on-device**: re-taught
+the same flow, `tryResolvePostTypingTap` now correctly committed a real
+CLICK (`"Domino's Pizza"`) where it previously logged the ambiguous-match
+warning and silently substituted a fake submit.
+
+**2. `findNode`/`findNodeByValue` were always single-shot, contradicting
+this README's own earlier claim** ("findNode retries for up to 1.5s") —
+checked by reading `ReplayPlanner.kt` directly, that retry never existed.
+Confirmed on-device: a live search-as-you-type screen renders in WAVES (an
+early sparse state, e.g. `nodeCount=64`, can satisfy the settle-wait's own
+stability check during a brief lull before the real content arrives), and
+the very next step's one-shot `findNode` call can lose that race. Fixed:
+`ReplayPlanner` now retries a null `findNode`/`findNodeByValue` result every
+250ms for up to 1.5s before giving up, still bounded well inside the outer
+5000ms `STEP_TIMEOUT_MS`. **Verified on-device**: the same step that
+previously failed instantly now succeeds after the content finishes
+loading, without changing anything about steps that were already fast.
+
+**3. `NodeWalker.resolve()`'s last-resort className+indexInParent tier
+had zero ambiguity protection**, unlike every tier above it (`resourceId`/
+`text`/`contentDescription` all route through `pickAmong`, which refuses —
+`Stuck`, not a guess — when several candidates can't be disambiguated by
+`contextLabel`). The className+index tier used a plain `find()`: first
+match in traversal order, full stop. Confirmed root cause of a real mis-tap
+(a taught `layout_holder_menu_fab` FAB anchor, no text/contentDescription,
+resolved to an unrelated `FrameLayout` on the replay-time screen; after
+`performClick` "failed" on it, the coordinate-fallback tap landed on the
+search bar). Fixed: this tier now goes through the same `pickAmong`
+disambiguation as the others (a new `collectAllByClassNameAndIndex` +
+`pickAmong` overload taking a pre-collected match list, since this tier
+needs per-child index the plain-predicate `pickAmong` couldn't see).
+
+**3b. Even after #3, a related but DISTINCT problem surfaced**:
+`performAction(ACTION_CLICK)` can report `true` while doing nothing —
+confirmed on-device, a climbed-to-ancestor's click "succeeded" and the
+whole flow still reported `Done.`, while the app silently never left the
+search-results screen. Some views handle taps via custom touch/gesture
+logic instead of a real `OnClickListener`, and Android's accessibility
+layer doesn't reliably distinguish "dispatched" from "actually did the
+thing" for those. `NodeWalker.resolve()` now returns a `ResolvedMatch`
+(node + `requiredClimb: Boolean` — true when the actually-matched node
+wasn't itself clickable/editable/scrollable, so `actionable()` had to climb
+to a clickable ancestor, a guess about which container owns the real click
+behavior). `ReplayEngine.performClick()` now verifies the screen actually
+started changing (reusing the same fingerprint mechanism `waitForStableScreen`
+already had, refactored out as `waitForFingerprintChange`) before trusting
+a climbed match's reported success — but ONLY for climbed matches, and
+deliberately fails closed (`Stuck`) rather than retrying via the existing
+coordinate-tap fallback: that fallback is for a click KNOWN to have failed
+(`ok=false`); retrying here too would risk a genuine double-fire on some
+OTHER click that legitimately doesn't change the screen (a toggle,
+add-to-cart), which this heuristic can't tell apart from "climbed ancestor
+did nothing". A direct hit (matched node already clickable) is trusted as
+before, unchanged, so this adds zero extra latency to the common case.
+
+**What was verified, all three/four together:** `:domain:test` passes
+unchanged (the fix in #2 lives in `:domain` and is exercised by the
+existing suite, just slower on the "genuinely not found" tests due to the
+real retry delay — no test needed updating, since the fake `NodeProvider`'s
+behavior per call didn't change, only how many times it's called).
+`:app:assembleDebug` — `BUILD SUCCESSFUL`. On-device: the same real taught
+flow that motivated the settle-wait fix now runs its `CLICK`→`SET_TEXT`→
+`SUBMIT_SEARCH` sequence cleanly every time (previously always failed by
+step 1), and a second, independently re-taught flow reached `Done.` twice
+in separate runs. **Still open:** getting airtight proof of a "real"
+`Completed` (not just no-crash/no-hang, but landing on the exact intended
+screen) for THIS specific taught flow ran into two separate, pre-existing,
+already-documented issues unrelated to tonight's fixes: (a) the target
+restaurant's own live "accepting orders" status changed between test runs
+(a real-world moving target, not a bug), and (b) raw touch capture
+intermittently drops the search-bar tap entirely during teaching (this
+file's own 28 Sep entry on `TouchInteractionController` silently going
+dead already covers this). Re-verify end to end once those are addressed
+or worked around; the specific bugs this pass targeted are fixed and
+individually confirmed regardless.
+
 ## Setup once this reaches a real machine
 
 1. Open in Android Studio (needs internet — this project's Gradle files

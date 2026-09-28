@@ -3,6 +3,7 @@ package com.calo.domain.replay
 import com.calo.domain.gate.CredentialGateRules
 import com.calo.domain.gate.GateVerdict
 import com.calo.domain.model.ActionType
+import com.calo.domain.model.ElementAnchor
 import com.calo.domain.model.FlowStep
 import com.calo.domain.slots.SlotResolver
 import java.util.concurrent.Callable
@@ -138,6 +139,38 @@ object ReplayPlanner {
         withStepTimeout(stepOrder, "awaitScreenChange") { provider.awaitScreenChange() }
     }
 
+    // Confirmed on-device (2026-09-29, Zomato search-as-you-type): a screen
+    // backed by a live/staggered content load can render in WAVES — an
+    // early, sparser intermediate state can satisfy awaitScreenChange's own
+    // stability check (two 250ms-apart reads happening to agree during a
+    // brief lull between waves) well before the real target element has
+    // actually appeared. README previously claimed findNode "retries for up
+    // to 1.5s" — false, confirmed by reading this file: every lookup here
+    // was always single-shot before this. A null result is now retried a
+    // few times, spaced out, before being treated as genuinely absent —
+    // bounded well inside the outer STEP_TIMEOUT_MS backstop, so a
+    // genuinely-gone element still fails within the same overall budget.
+    private const val FIND_RETRY_INTERVAL_MS = 250L
+    private const val FIND_RETRY_WINDOW_MS = 1_500L
+
+    private fun findNodeWithRetry(provider: NodeProvider, anchor: ElementAnchor): NodeHandle? {
+        val deadline = System.currentTimeMillis() + FIND_RETRY_WINDOW_MS
+        while (true) {
+            provider.findNode(anchor)?.let { return it }
+            if (System.currentTimeMillis() >= deadline) return null
+            Thread.sleep(FIND_RETRY_INTERVAL_MS)
+        }
+    }
+
+    private fun findNodeByValueWithRetry(provider: NodeProvider, value: String): NodeHandle? {
+        val deadline = System.currentTimeMillis() + FIND_RETRY_WINDOW_MS
+        while (true) {
+            provider.findNodeByValue(value)?.let { return it }
+            if (System.currentTimeMillis() >= deadline) return null
+            Thread.sleep(FIND_RETRY_INTERVAL_MS)
+        }
+    }
+
     fun replay(
         steps: List<FlowStep>,
         slotValues: Map<String, String>,
@@ -180,17 +213,17 @@ object ReplayPlanner {
                         // searches by the new value instead of using findNode().
                         val searchValue = SlotResolver.resolveClickTarget(step, slotValues)
                         val node = if (searchValue != null) {
-                            withStepTimeout(step.order, "findNodeByValue") { provider.findNodeByValue(searchValue) }
+                            withStepTimeout(step.order, "findNodeByValue") { findNodeByValueWithRetry(provider, searchValue) }
                                 ?: return ReplayResult.Stuck(step.order, "couldn't find an option matching '$searchValue'")
                         } else {
-                            withStepTimeout(step.order, "findNode") { provider.findNode(step.target) }
+                            withStepTimeout(step.order, "findNode") { findNodeWithRetry(provider, step.target) }
                                 ?: return ReplayResult.Stuck(step.order, "element not found: ${step.target}")
                         }
                         withStepTimeout(step.order, "performClick", isAction = true) { provider.performClick(node) }
                             .also { performed -> if (performed) awaitScreenChange(step.order, provider) }
                     }
                     ActionType.SET_TEXT -> {
-                        val node = withStepTimeout(step.order, "findNode") { provider.findNode(step.target) }
+                        val node = withStepTimeout(step.order, "findNode") { findNodeWithRetry(provider, step.target) }
                             ?: return ReplayResult.Stuck(step.order, "element not found: ${step.target}")
                         val value = SlotResolver.resolveValue(step, slotValues)
                             ?: return ReplayResult.Stuck(step.order, "no value to type (should be unreachable for SET_TEXT)")
@@ -198,7 +231,7 @@ object ReplayPlanner {
                             .also { performed -> if (performed) awaitScreenChange(step.order, provider) }
                     }
                     ActionType.SCROLL -> {
-                        val node = withStepTimeout(step.order, "findNode") { provider.findNode(step.target) }
+                        val node = withStepTimeout(step.order, "findNode") { findNodeWithRetry(provider, step.target) }
                             ?: return ReplayResult.Stuck(step.order, "element not found: ${step.target}")
                         withStepTimeout(step.order, "performScroll", isAction = true) { provider.performScroll(node, forward = true) }
                             .also { performed -> if (performed) awaitScreenChange(step.order, provider) }
@@ -211,7 +244,7 @@ object ReplayPlanner {
                         if (!withStepTimeout(step.order, "imeEnterApiSupported") { provider.imeEnterApiSupported() }) {
                             return ReplayResult.Stuck(step.order, "IME_ENTER_UNSUPPORTED: ACTION_IME_ENTER needs API 30+, this device is below that")
                         }
-                        val node = withStepTimeout(step.order, "findNode") { provider.findNode(step.target) }
+                        val node = withStepTimeout(step.order, "findNode") { findNodeWithRetry(provider, step.target) }
                             ?: return ReplayResult.Stuck(step.order, "element not found: ${step.target}")
                         // Not all editable fields expose ACTION_IME_ENTER even
                         // on a supported API level — only when the resolved
