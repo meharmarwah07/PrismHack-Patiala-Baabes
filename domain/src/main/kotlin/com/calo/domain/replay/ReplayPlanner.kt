@@ -5,6 +5,11 @@ import com.calo.domain.gate.GateVerdict
 import com.calo.domain.model.ActionType
 import com.calo.domain.model.FlowStep
 import com.calo.domain.slots.SlotResolver
+import java.util.concurrent.Callable
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 
 /**
  * The sequencing logic for replaying a taught flow, with zero Android
@@ -52,6 +57,55 @@ import com.calo.domain.slots.SlotResolver
  */
 object ReplayPlanner {
 
+    // Every NodeProvider call is, in the real :app adapter, a synchronous
+    // AccessibilityNodeInfo/Binder call into the target app's process — and
+    // that IPC has no OS-level timeout of its own. Two confirmed on-device
+    // hangs (2026-09-28) showed the step loop can block forever with zero
+    // further log output: once on a killed target task (the window the
+    // Binder call was querying simply stopped answering), once between two
+    // otherwise-instant steps with no distinguishing signal. Every provider
+    // call here is run on a worker thread and bounded by STEP_TIMEOUT_MS so
+    // a stuck call surfaces as Stuck instead of dead air.
+    //
+    // Value chosen against tonight's real latency data: normal steps
+    // complete near-instantly, and CredentialGate.check() — the most
+    // expensive per-step call — takes up to ~350ms on a complex screen.
+    // 5000ms is >10x that worst-case normal cost (room for a legitimately
+    // slow-but-fine screen transition) while still resolving well inside a
+    // live demo's patience, and since a timeout aborts the step immediately
+    // (no further provider calls are attempted for that step), 5000ms is
+    // also the worst-case total added latency per replay() call, not a
+    // multiplier per step.
+    private const val STEP_TIMEOUT_MS = 5_000L
+
+    // Binder calls into a dead/killed window are not guaranteed to honor
+    // Thread.interrupt() — the underlying IPC can stay blocked in native
+    // code indefinitely even after we give up waiting on it here. Running
+    // each call on its own worker thread means a genuinely stuck call
+    // leaks that one thread rather than the whole replay loop; daemon
+    // threads keep that from ever blocking JVM/process shutdown (including
+    // the JUnit run itself).
+    private val timeoutExecutor = Executors.newCachedThreadPool { runnable ->
+        Thread(runnable, "ReplayStepTimeout").apply { isDaemon = true }
+    }
+
+    private class StepTimeoutException(val stepOrder: Int, message: String) : RuntimeException(message)
+
+    private fun <T> withStepTimeout(stepOrder: Int, opName: String, block: () -> T): T {
+        val future = timeoutExecutor.submit(Callable(block))
+        return try {
+            future.get(STEP_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+        } catch (e: TimeoutException) {
+            future.cancel(true) // best-effort; may not actually unblock a stuck Binder call
+            throw StepTimeoutException(
+                stepOrder,
+                "step $stepOrder timed out after ${STEP_TIMEOUT_MS}ms waiting for $opName — target screen may be gone"
+            )
+        } catch (e: ExecutionException) {
+            throw (e.cause ?: e)
+        }
+    }
+
     fun replay(
         steps: List<FlowStep>,
         slotValues: Map<String, String>,
@@ -60,67 +114,77 @@ object ReplayPlanner {
         val ordered = steps.sortedBy { it.order }
         var previousStep: FlowStep? = null
 
-        for (step in ordered) {
-            // Rule 1 — see class doc. Unconditional, before anything else
-            // this iteration, including the duplicate check below.
-            val verdict = CredentialGateRules.classify(provider.currentScreenSignals())
-            if (verdict is GateVerdict.Blocked) {
-                return ReplayResult.Halted(atStepOrder = step.order, reason = verdict.reason)
-            }
-
-            if (isDuplicateClick(step, previousStep)) {
-                previousStep = step
-                continue
-            }
-
-            val ok = when (step.action) {
-                ActionType.WAIT -> {
-                    provider.awaitIdle()
-                    true
+        try {
+            for (step in ordered) {
+                // Gate check happens first, before resolving or touching any
+                // node for this step — a Blocked verdict means this step (and
+                // everything after it) is never attempted. Unconditional, even
+                // for a step about to be skipped as a duplicate below: the
+                // "checked before EVERY step, no exceptions" guarantee must not
+                // grow a silent gap for skipped steps.
+                val verdict = CredentialGateRules.classify(
+                    withStepTimeout(step.order, "currentScreenSignals") { provider.currentScreenSignals() }
+                )
+                if (verdict is GateVerdict.Blocked) {
+                    return ReplayResult.Halted(atStepOrder = step.order, reason = verdict.reason)
                 }
-                ActionType.CLICK -> {
-                    // A slot value that genuinely differs from what was
-                    // taught means the original anchor now names the WRONG
-                    // option (e.g. taught tapping "Home", replaying with
-                    // "Work") — re-resolving that anchor would silently tap
-                    // the stale element instead of generalizing, so this
-                    // searches by the new value instead of using findNode().
-                    val searchValue = SlotResolver.resolveClickTarget(step, slotValues)
-                    val node = if (searchValue != null) {
-                        provider.findNodeByValue(searchValue)
-                            ?: return ReplayResult.Stuck(step.order, "couldn't find an option matching '$searchValue'")
-                    } else {
-                        provider.findNode(step.target)
-                            ?: return ReplayResult.Stuck(step.order, "element not found: ${step.target}")
+
+                if (isDuplicateClick(step, previousStep)) {
+                    previousStep = step
+                    continue
+                }
+
+                val ok = when (step.action) {
+                    ActionType.WAIT -> {
+                        withStepTimeout(step.order, "awaitIdle") { provider.awaitIdle() }
+                        true
                     }
-                    provider.performClick(node)
+                    ActionType.CLICK -> {
+                        // A slot value that genuinely differs from what was
+                        // taught means the original anchor now names the WRONG
+                        // option (e.g. taught tapping "Home", replaying with
+                        // "Work") — re-resolving that anchor would silently tap
+                        // the stale element instead of generalizing, so this
+                        // searches by the new value instead of using findNode().
+                        val searchValue = SlotResolver.resolveClickTarget(step, slotValues)
+                        val node = if (searchValue != null) {
+                            withStepTimeout(step.order, "findNodeByValue") { provider.findNodeByValue(searchValue) }
+                                ?: return ReplayResult.Stuck(step.order, "couldn't find an option matching '$searchValue'")
+                        } else {
+                            withStepTimeout(step.order, "findNode") { provider.findNode(step.target) }
+                                ?: return ReplayResult.Stuck(step.order, "element not found: ${step.target}")
+                        }
+                        withStepTimeout(step.order, "performClick") { provider.performClick(node) }
+                    }
+                    ActionType.SET_TEXT -> {
+                        val node = withStepTimeout(step.order, "findNode") { provider.findNode(step.target) }
+                            ?: return ReplayResult.Stuck(step.order, "element not found: ${step.target}")
+                        val value = SlotResolver.resolveValue(step, slotValues)
+                            ?: return ReplayResult.Stuck(step.order, "no value to type (should be unreachable for SET_TEXT)")
+                        withStepTimeout(step.order, "performSetText") { provider.performSetText(node, value) }
+                    }
+                    ActionType.SCROLL -> {
+                        val node = withStepTimeout(step.order, "findNode") { provider.findNode(step.target) }
+                            ?: return ReplayResult.Stuck(step.order, "element not found: ${step.target}")
+                        withStepTimeout(step.order, "performScroll") { provider.performScroll(node, forward = true) }
+                    }
                 }
-                ActionType.SET_TEXT -> {
-                    val node = provider.findNode(step.target)
-                        ?: return ReplayResult.Stuck(step.order, "element not found: ${step.target}")
-                    val value = SlotResolver.resolveValue(step, slotValues)
-                        ?: return ReplayResult.Stuck(step.order, "no value to type (should be unreachable for SET_TEXT)")
-                    provider.performSetText(node, value)
+
+                if (!ok) {
+                    // This is the ACTION_SET_TEXT caveat made explicit: if
+                    // performAction() returns false — e.g. a custom widget that
+                    // silently doesn't support ACTION_SET_TEXT — this step is
+                    // Stuck, not silently treated as success.
+                    return ReplayResult.Stuck(step.order, "action ${step.action} did not apply to resolved node")
                 }
-                ActionType.SCROLL -> {
-                    val node = provider.findNode(step.target)
-                        ?: return ReplayResult.Stuck(step.order, "element not found: ${step.target}")
-                    provider.performScroll(node, forward = true)
-                }
+
+                previousStep = step
             }
 
-            if (!ok) {
-                // This is the ACTION_SET_TEXT caveat made explicit: if
-                // performAction() returns false — e.g. a custom widget that
-                // silently doesn't support ACTION_SET_TEXT — this step is
-                // Stuck, not silently treated as success.
-                return ReplayResult.Stuck(step.order, "action ${step.action} did not apply to resolved node")
-            }
-
-            previousStep = step
+            return ReplayResult.Completed
+        } catch (e: StepTimeoutException) {
+            return ReplayResult.Stuck(e.stepOrder, e.message ?: "step timed out")
         }
-
-        return ReplayResult.Completed
     }
 
     // Compares identity fields only (the ones NodeWalker's resolver actually
