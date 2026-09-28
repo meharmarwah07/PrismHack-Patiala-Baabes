@@ -588,6 +588,69 @@ process kill. Test in that order: teach "search wireless earbuds and add the
 first result to cart" on Amazon, `DUMP_FLOWS` to confirm the roles, replay
 it on Amazon, then say "…on Myntra".
 
+## Fixed: replay never waited for the screen to settle between steps (29 Sep 2026)
+
+"The recorded flow does not run completely" — every real taught flow with
+more than one screen transition failed almost immediately. Root-caused and
+fixed this session, both confirmed on-device (Realme, ColorOS, `com.calo`
+build installed 29 Sep 00:26), not just by re-reading code.
+
+**Root cause:** `NodeProvider.awaitScreenChange()`'s own doc comment says
+"Called after every performed action: wait for whatever it triggered to
+finish drawing" — but `ReplayPlanner.replay()` never called it. The only
+call to a settle-wait anywhere in the step loop was gated behind
+`ActionType.WAIT`, and `TeachRecorder` never records a `WAIT` step (grep
+confirms zero references), so every real taught flow went straight from a
+successful `performClick`/`performSetText`/`performScroll`/`performImeEnter`
+into the very next step's gate check and `findNode()` with no wait at all.
+`ReplayEngine.waitForStableScreen()` (the 300ms-min/4000ms-max settle poll
+this project's own comments and README's "Screen waits" section already
+describe) only ever ran once, before step 1 — the documented per-step
+behavior simply didn't exist in the code that runs it.
+
+**Confirmed on-device before the fix, live logcat:** replaying a real taught
+flow (open Zomato search → type "Dominos" → submit → tap a result) failed
+at step 1 every time — `findNode()` for the search bar was attempted 145ms
+after the previous step's own transition began, nowhere near enough time
+for Zomato's UI to react.
+
+**Fix:** `ReplayPlanner.replay()` now calls `provider.awaitScreenChange()`
+(wrapped in the existing `STEP_TIMEOUT_MS` guard, not marked `isAction`)
+immediately after any CLICK/SET_TEXT/SCROLL/SUBMIT_SEARCH action that
+reports success, before moving on to the next step. `:domain:test` — all
+existing tests pass unchanged (the fake `NodeProvider`'s `awaitScreenChange`
+is the interface's own no-op default, so no test needed updating).
+
+**Confirmed on-device after the fix, same flow, same device:** all three
+steps that previously never ran now complete — `CLICK` opens search,
+`SET_TEXT` types "Dominos", `SUBMIT_SEARCH` (`ACTION_IME_ENTER`) submits —
+each with a real ~2s gap matching the screen's actual transition time. The
+flow's 4th and final step then went `Stuck` looking for a specific search
+result (`"Paneer Maxxx"`) that Zomato's live results for "Dominos" no longer
+contain (confirmed by screenshot: current results are Domino's Pizza, Pizza
+Hut, Oven Story Pizza, Domnik Pizza, Cheese Burst Factory — no "Paneer
+Maxxx" anywhere) — real-world content drift between teach time and replay
+time, the same structural risk this file's "Claims that don't match the
+repo" / `KNOWN_LIMITATIONS.md`'s text-match-staleness section already
+name, not a regression or a new bug. Replay correctly reported `Stuck`
+with a clear reason instead of guessing.
+
+**Separately confirmed, not fixed this pass (pre-existing, different bug):**
+teaching a fresh flow via two `adb shell input tap` taps (open search, tap
+a result) recorded neither `CLICK` — only the `SET_TEXT` and incidental
+`SCROLL` events landed. This matches `KNOWN_LIMITATIONS.md`'s already-open
+"`AccessibilityEvent.source == null` — confirmed still present, unhandled"
+entry; whether synthetic `adb input tap` events specifically hit this same
+gap (as opposed to only some real-touch cases) wasn't previously documented
+and is worth a note for anyone using adb-driven taps to script teaching.
+
+**Still open:** the two saved on-device flows both start with steps taught
+weeks ago against Zomato's then-current UI/content — re-teaching them fresh
+would give a cleaner end-to-end `Completed` demonstration than relying on
+whatever search results happen to still exist. The fix itself is now
+verified against the actual failure mode reported ("does not run
+completely"), not just against unit tests.
+
 ## Setup once this reaches a real machine
 
 1. Open in Android Studio (needs internet — this project's Gradle files

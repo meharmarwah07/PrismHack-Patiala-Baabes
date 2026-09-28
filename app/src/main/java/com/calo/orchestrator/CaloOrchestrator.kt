@@ -2,6 +2,7 @@ package com.calo.orchestrator
 
 import android.content.Context
 import android.content.Intent
+import android.view.accessibility.AccessibilityNodeInfo
 import com.calo.accessibility.CaloAccessibilityService
 import com.calo.data.FlowRepository
 import com.calo.data.LearnedFlow
@@ -41,6 +42,20 @@ class CaloOrchestrator(context: Context) {
         // anything is tapped. The parser reports 0.0 when the reply had no
         // confidence at all, so a missing value also asks.
         const val CONFIDENCE_THRESHOLD = 0.6
+
+        // launchAndWaitForForeground: how many text/contentDescription-
+        // bearing nodes a screen needs before it counts as "actually
+        // loaded", not just "the right package is in front". Confirmed
+        // on-device (2026-09-29, Zomato, cold start via FLAG_ACTIVITY_
+        // CLEAR_TASK): a splash/loading frame reports the correct
+        // currentPackageName() and can read as "stable" across two polls
+        // well before real content renders (observed nodeCount=9 total,
+        // most bare containers with no text at all) — replay proceeded
+        // against that stub tree and went Stuck on step 1 immediately,
+        // surfaced only as a spoken question easy to miss mid-demo. 5 is
+        // comfortably below any real app screen's content-bearing node
+        // count while safely above a bare splash/logo frame's.
+        const val MIN_CONTENT_NODES_FOR_ARRIVED = 5
     }
 
     private val appContext = context.applicationContext
@@ -276,6 +291,18 @@ class CaloOrchestrator(context: Context) {
      * foreground app (whatever was in front before the launch finishes)
      * would be exactly the silent-wrong-action failure mode this whole
      * project is built to avoid.
+     *
+     * Package-name match alone is NOT enough (2026-09-29, confirmed
+     * on-device): FLAG_ACTIVITY_CLEAR_TASK forces a genuine cold start,
+     * and a cold-started app's first frame (splash/loading skeleton)
+     * already reports the correct currentPackageName() well before real
+     * content renders — replay's own waitForStableScreen() doesn't catch
+     * this either, since two 250ms-apart polls of the same near-empty
+     * splash frame look "stable" too. Both layers agreeing "looks fine"
+     * on a screen that was never the real one is exactly how step 1 went
+     * Stuck immediately after a voice-triggered replay, reported only as
+     * a spoken question. See hasSubstantiveContent's doc for the added
+     * check.
      */
     private suspend fun launchAndWaitForForeground(
         service: CaloAccessibilityService,
@@ -291,12 +318,43 @@ class CaloOrchestrator(context: Context) {
         launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
         appContext.startActivity(launchIntent)
 
+        fun hasArrived(): Boolean {
+            if (service.currentPackageName() != targetPackage) return false
+            val root = service.currentRoot() ?: return false
+            return hasSubstantiveContent(root, MIN_CONTENT_NODES_FOR_ARRIVED) >= MIN_CONTENT_NODES_FOR_ARRIVED
+        }
+
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
-            if (service.currentPackageName() == targetPackage) return true
+            if (hasArrived()) return true
             delay(pollIntervalMs)
         }
-        return service.currentPackageName() == targetPackage
+        return hasArrived()
+    }
+
+    /**
+     * Counts nodes under (and including) [node] with non-blank text or
+     * contentDescription, up to [limit] — never more, even if the real
+     * count is much higher. Same bounded-traversal shape as TeachRecorder's
+     * countVisibleTextNodes for the same reason: this project already got
+     * burned twice (2026-09-26) by a version that only bounded recursion
+     * DEPTH while still paying one getChild() IPC per remaining sibling
+     * past the limit — a wide splash/loading screen ANR'd on that exact
+     * mistake. Breaking the loop entirely once the limit is hit, not just
+     * skipping the recursive call, is what actually fixed it there; this
+     * copies that fix rather than the bug. [node] is borrowed and never
+     * recycled here; every child fetched via getChild() is recycled on the
+     * way back out regardless of whether it was counted.
+     */
+    private fun hasSubstantiveContent(node: AccessibilityNodeInfo, limit: Int): Int {
+        var count = if (!node.text.isNullOrBlank() || !node.contentDescription.isNullOrBlank()) 1 else 0
+        for (i in 0 until node.childCount) {
+            if (count >= limit) break
+            val child = node.getChild(i) ?: continue
+            count += hasSubstantiveContent(child, limit - count)
+            child.recycle()
+        }
+        return count
     }
 
     /**

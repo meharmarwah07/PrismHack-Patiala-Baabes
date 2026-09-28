@@ -121,6 +121,23 @@ object ReplayPlanner {
         }
     }
 
+    // NodeProvider.awaitScreenChange's own doc says "called after every
+    // performed action" — until this fix (2026-09-29), nothing here actually
+    // called it: this loop went straight from a successful performClick/
+    // performSetText/performScroll/performImeEnter into the NEXT step's gate
+    // check and findNode(), with no wait for the tap's own screen transition
+    // to even start. Confirmed on-device the same day: a real taught flow
+    // (tap search bar -> type -> submit -> tap result) failed at step 2 only
+    // ~145ms after step 1's tap reported success — nowhere near enough time
+    // for Zomato's search interstitial to finish animating in, so findNode()
+    // for step 2's field searched a screen that was still mid-transition.
+    // Not an isAction call (it performs nothing on the device, just reads/
+    // waits), so a timeout here surfaces as an ordinary Stuck, never
+    // actionMayHaveExecuted.
+    private fun awaitScreenChange(stepOrder: Int, provider: NodeProvider) {
+        withStepTimeout(stepOrder, "awaitScreenChange") { provider.awaitScreenChange() }
+    }
+
     fun replay(
         steps: List<FlowStep>,
         slotValues: Map<String, String>,
@@ -170,6 +187,7 @@ object ReplayPlanner {
                                 ?: return ReplayResult.Stuck(step.order, "element not found: ${step.target}")
                         }
                         withStepTimeout(step.order, "performClick", isAction = true) { provider.performClick(node) }
+                            .also { performed -> if (performed) awaitScreenChange(step.order, provider) }
                     }
                     ActionType.SET_TEXT -> {
                         val node = withStepTimeout(step.order, "findNode") { provider.findNode(step.target) }
@@ -177,11 +195,13 @@ object ReplayPlanner {
                         val value = SlotResolver.resolveValue(step, slotValues)
                             ?: return ReplayResult.Stuck(step.order, "no value to type (should be unreachable for SET_TEXT)")
                         withStepTimeout(step.order, "performSetText", isAction = true) { provider.performSetText(node, value) }
+                            .also { performed -> if (performed) awaitScreenChange(step.order, provider) }
                     }
                     ActionType.SCROLL -> {
                         val node = withStepTimeout(step.order, "findNode") { provider.findNode(step.target) }
                             ?: return ReplayResult.Stuck(step.order, "element not found: ${step.target}")
                         withStepTimeout(step.order, "performScroll", isAction = true) { provider.performScroll(node, forward = true) }
+                            .also { performed -> if (performed) awaitScreenChange(step.order, provider) }
                     }
                     ActionType.SUBMIT_SEARCH -> {
                         // Capability gate BEFORE resolving anything — a
@@ -203,6 +223,7 @@ object ReplayPlanner {
                             return ReplayResult.Stuck(step.order, "IME_ENTER_UNSUPPORTED: resolved field does not currently expose ACTION_IME_ENTER")
                         }
                         withStepTimeout(step.order, "performImeEnter", isAction = true) { provider.performImeEnter(node) }
+                            .also { performed -> if (performed) awaitScreenChange(step.order, provider) }
                     }
                 }
 
