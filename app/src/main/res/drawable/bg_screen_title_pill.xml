@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Rounded pill used as the title chip on secondary screens (Themes, Saved workflows) -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="?attr/caloColorButtonBg" />
+    <corners android:radius="20dp" />
+</shape>

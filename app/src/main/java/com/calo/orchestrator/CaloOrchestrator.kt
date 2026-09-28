@@ -10,6 +10,7 @@ import com.calo.domain.model.ElementAnchor
 import com.calo.domain.model.FlowStep
 import com.calo.domain.model.SlotDefinition
 import com.calo.domain.nlu.CandidateFlow
+import com.calo.domain.replay.ReplayMode
 import com.calo.domain.replay.ReplayResult
 import com.calo.domain.replay.StuckAction
 import com.calo.domain.replay.StuckAnswerHandler
@@ -171,18 +172,20 @@ class CaloOrchestrator(context: Context) {
             } else {
                 taughtPackage
             }
-            // Note (2026-09-28): a "SEMANTIC" cross-app replay mode was
-            // prototyped on a teammate's branch (grounding a flow on a
-            // DIFFERENT app than it was taught on) but deliberately left
-            // out of this integration — see ReplayPlanner's class doc for
-            // why (rejected architecture direction, +4 bonus item, real
-            // safety/determinism cost). If targetPackage differs from
-            // taughtPackage here (the user named a different app by
-            // voice), replay still runs in the only mode that exists —
-            // the taught anchors won't resolve on a different app's
-            // screen, so this correctly surfaces as Stuck rather than
-            // silently misfiring; it just won't succeed. Documented, not
-            // a regression from anything that worked before.
+            // Merged 2026-09-29: cross-app SEMANTIC replay (grounding a
+            // flow on a DIFFERENT app than it was taught on), previously
+            // prototyped on a teammate's branch and deliberately left out
+            // of an earlier integration pass, is wired in for real here —
+            // see ReplayPlanner's class doc for the mechanism.
+            val mode = if (targetPackage == taughtPackage) ReplayMode.EXACT else ReplayMode.SEMANTIC
+
+            // Fresh labels under the current rules, so flows saved before a
+            // labelling fix (or before roles existed) replay correctly.
+            val steps = RoleLabeler.relabel(matchedFlow.steps)
+            if (mode == ReplayMode.SEMANTIC && steps.none { it.role != null }) {
+                onStatus("I learned \"${matchedFlow.description}\" on ${appLabel(taughtPackage)}, but it isn't a task I know how to carry over to ${appLabel(targetPackage)}.")
+                return@launch
+            }
 
             // Always a FRESH start at the app's home screen: re-opening a
             // running app otherwise resumes whatever screen it was last on
@@ -196,11 +199,24 @@ class CaloOrchestrator(context: Context) {
                 return@launch
             }
 
-            onStatus("Replaying: ${matchedFlow.description}")
+            onStatus(
+                if (mode == ReplayMode.SEMANTIC) {
+                    "Doing \"${matchedFlow.description}\" on ${appLabel(targetPackage)} (learned on ${appLabel(taughtPackage)})..."
+                } else {
+                    "Replaying: ${matchedFlow.description}"
+                }
+            )
+            // Counts as "used" here, not only on a Completed result: the
+            // Saved Workflows screen's usage stat is about how many times
+            // the user actually invoked the flow by voice, the same way a
+            // Halted/Stuck attempt is still a real attempt worth surfacing —
+            // not a claim that it always finished successfully.
+            repository.recordUsage(matchedFlow.id)
+
             val engine = ReplayEngine(service)
             // Off the main thread: replay sleeps while screens settle.
-            val result = withContext(Dispatchers.Default) { engine.replay(matchedFlow.steps, match.slotValues) }
-            handleReplayResult(engine, matchedFlow.steps, match.slotValues, result, onStatus)
+            val result = withContext(Dispatchers.Default) { engine.replay(steps, match.slotValues, mode) }
+            handleReplayResult(engine, steps, match.slotValues, result, onStatus, mode = mode)
         }
     }
 
@@ -233,7 +249,8 @@ class CaloOrchestrator(context: Context) {
         slotValues: Map<String, String>,
         result: ReplayResult,
         onStatus: (String) -> Unit,
-        attempt: Int = 1
+        attempt: Int = 1,
+        mode: ReplayMode = ReplayMode.EXACT
     ) {
         if (result !is ReplayResult.Stuck) {
             onStatus(describeResult(result))
@@ -255,7 +272,7 @@ class CaloOrchestrator(context: Context) {
         val outcome = listenForStuckAnswer()
         when (val action = StuckAnswerHandler.handle(outcome, attempt)) {
             StuckAction.Stop -> onStatus("Stopped.")
-            StuckAction.Repeat -> handleReplayResult(engine, steps, slotValues, result, onStatus, attempt = attempt + 1)
+            StuckAction.Repeat -> handleReplayResult(engine, steps, slotValues, result, onStatus, attempt = attempt + 1, mode = mode)
             is StuckAction.Retry -> {
                 val remaining = steps.filter { it.order >= result.atStepOrder }
                 val target = remaining.first()
@@ -269,8 +286,8 @@ class CaloOrchestrator(context: Context) {
                 val retrySlotValues = slotValues + (retrySlotName to action.newValue)
 
                 onStatus("Trying \"${action.newValue}\" instead...")
-                val retryResult = engine.replay(retrySteps, retrySlotValues)
-                handleReplayResult(engine, retrySteps, retrySlotValues, retryResult, onStatus, attempt = 1)
+                val retryResult = engine.replay(retrySteps, retrySlotValues, mode)
+                handleReplayResult(engine, retrySteps, retrySlotValues, retryResult, onStatus, attempt = 1, mode = mode)
             }
         }
     }

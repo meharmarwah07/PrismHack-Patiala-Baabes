@@ -18,6 +18,9 @@ class FlowRepository(context: Context) {
 
     suspend fun all(): List<LearnedFlow> = dao.getAll()
 
+    suspend fun recordUsage(flowId: String, timestamp: Long = System.currentTimeMillis()) =
+        dao.recordUsage(flowId, timestamp)
+
     suspend fun delete(flow: LearnedFlow) = dao.delete(flow)
 
     suspend fun deleteAll() = dao.deleteAll()

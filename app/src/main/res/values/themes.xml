@@ -1,11 +1,76 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources xmlns:tools="http://schemas.android.com/tools">
-    <style name="Theme.Calo" parent="Theme.AppCompat.NoActionBar">
+
+    <!--
+      Theme.Calo is the manifest/launch default so the app never boots
+      without a valid theme — it's just an alias for Default. Every Activity
+      actually runs under whichever of the two concrete themes below
+      ThemePrefs picks at runtime (see ui/ThemePrefs.kt, ui/CaloBaseActivity.kt).
+    -->
+    <style name="Theme.Calo" parent="Theme.Calo.Default" />
+
+    <style name="Theme.Calo.Default" parent="Theme.AppCompat.NoActionBar">
         <item name="android:windowBackground">@color/calo_bg</item>
         <item name="android:statusBarColor">@color/calo_bg</item>
         <item name="android:navigationBarColor">@color/calo_bg</item>
         <item name="android:windowLightStatusBar" tools:targetApi="23">false</item>
         <item name="colorPrimary">@color/calo_peach</item>
         <item name="colorAccent">@color/calo_peach</item>
+
+        <item name="caloColorBackground">@color/calo_bg</item>
+        <item name="caloColorSurface">@color/calo_surface</item>
+        <item name="caloColorAccentStart">@color/calo_coral</item>
+        <item name="caloColorAccentEnd">@color/calo_orange</item>
+        <item name="caloColorButtonBg">@color/calo_peach</item>
+        <item name="caloColorButtonText">@color/calo_button_text</item>
+        <item name="caloColorTextPrimary">@color/calo_text_primary</item>
+        <item name="caloColorTextSecondary">@color/calo_text_secondary</item>
     </style>
+
+    <style name="Theme.Calo.BlackWhite" parent="Theme.AppCompat.NoActionBar">
+        <item name="android:windowBackground">@color/calo_bw_bg</item>
+        <item name="android:statusBarColor">@color/calo_bw_bg</item>
+        <item name="android:navigationBarColor">@color/calo_bw_bg</item>
+        <item name="android:windowLightStatusBar" tools:targetApi="23">false</item>
+        <item name="colorPrimary">@color/calo_bw_button_bg</item>
+        <item name="colorAccent">@color/calo_bw_button_bg</item>
+
+        <item name="caloColorBackground">@color/calo_bw_bg</item>
+        <item name="caloColorSurface">@color/calo_bw_surface</item>
+        <item name="caloColorAccentStart">@color/calo_bw_accent_start</item>
+        <item name="caloColorAccentEnd">@color/calo_bw_accent_end</item>
+        <item name="caloColorButtonBg">@color/calo_bw_button_bg</item>
+        <item name="caloColorButtonText">@color/calo_bw_button_text</item>
+        <item name="caloColorTextPrimary">@color/calo_bw_text_primary</item>
+        <item name="caloColorTextSecondary">@color/calo_bw_text_secondary</item>
+    </style>
+
+    <!-- Nav drawer row pieces (view_nav_drawer.xml) -->
+    <style name="NavDrawerRow">
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:orientation">horizontal</item>
+        <item name="android:gravity">center_vertical</item>
+        <item name="android:paddingStart">24dp</item>
+        <item name="android:paddingEnd">24dp</item>
+        <item name="android:paddingTop">14dp</item>
+        <item name="android:paddingBottom">14dp</item>
+        <item name="android:background">?attr/selectableItemBackground</item>
+        <item name="android:clickable">true</item>
+        <item name="android:focusable">true</item>
+    </style>
+
+    <style name="NavDrawerIcon">
+        <item name="android:layout_width">22dp</item>
+        <item name="android:layout_height">22dp</item>
+        <item name="android:layout_marginEnd">18dp</item>
+    </style>
+
+    <style name="NavDrawerLabel">
+        <item name="android:layout_width">wrap_content</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:textColor">?attr/caloColorTextSecondary</item>
+        <item name="android:textSize">15sp</item>
+    </style>
+
 </resources>

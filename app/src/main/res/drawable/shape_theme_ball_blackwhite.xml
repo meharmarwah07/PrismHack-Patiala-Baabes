@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Themes row's leading "ball" when the BlackWhite theme is active — see shape_theme_ball_default.xml's comment on why colors are literal. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="oval">
+    <gradient
+        android:type="linear"
+        android:angle="315"
+        android:startColor="@color/calo_bw_accent_start"
+        android:endColor="@color/calo_bw_accent_end" />
+</shape>

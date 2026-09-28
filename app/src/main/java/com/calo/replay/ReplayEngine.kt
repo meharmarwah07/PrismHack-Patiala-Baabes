@@ -7,20 +7,23 @@ import android.view.accessibility.AccessibilityNodeInfo
 import com.calo.accessibility.CaloAccessibilityService
 import com.calo.accessibility.CredentialGate
 import com.calo.accessibility.NodeWalker
+import com.calo.accessibility.ScreenSnapshot
 import com.calo.domain.gate.ScreenSignals
 import com.calo.domain.model.ElementAnchor
 import com.calo.domain.model.FlowStep
 import com.calo.domain.replay.NodeHandle
 import com.calo.domain.replay.NodeProvider
+import com.calo.domain.replay.ReplayMode
 import com.calo.domain.replay.ReplayPlanner
 import com.calo.domain.replay.ReplayResult
+import com.calo.domain.semantic.ScreenElement
 
 // requiredClimb: true when NodeWalker had to climb from the actually-matched
 // node to a clickable ANCESTOR (see NodeWalker.ResolvedMatch) — a guess
 // about which container owns the real click behavior, as opposed to a
 // direct hit on a node that was already clickable/editable/scrollable.
-// Defaults false for handles from findNodeByValue (slot-driven CLICK
-// search), which has no equivalent "matched vs climbed" distinction.
+// Defaults false for handles that have no equivalent "matched vs climbed"
+// distinction (findNodeByValue, screenElements/nodeForElement).
 private class AndroidNodeHandle(val node: AccessibilityNodeInfo, val requiredClimb: Boolean = false) : NodeHandle
 
 /**
@@ -32,12 +35,12 @@ private class AndroidNodeHandle(val node: AccessibilityNodeInfo, val requiredCli
  * "if step N then..." branching, that logic belongs in ReplayPlanner, not
  * here — keeping that split is what makes the sequencing testable at all.
  *
- * Scope note (2026-09-28): does NOT implement the semantic-layer members
- * of NodeProvider (screenElements/nodeForElement/submitCurrentInput) —
- * those have safe empty/false/no-op defaults on the interface, which is
- * exactly correct here: cross-app "semantic" replay was left out of this
- * integration (see ReplayPlanner's class doc for why), so this provider
- * only ever needs to support ReplayPlanner's EXACT-mode path.
+ * Merged 2026-09-29: implements the full NodeProvider surface, including
+ * the semantic-layer members (screenElements/nodeForElement/
+ * submitCurrentInput) that a prior pass here deliberately left as no-ops —
+ * ReplayPlanner's EXACT mode now falls back to role-based matching when a
+ * step's own anchor can't be found, and SEMANTIC (cross-app) mode depends
+ * on these entirely, so this provider needs to support both for real.
  *
  * UNVERIFIED beyond compilation: there is no Android SDK, emulator, or
  * device in the environment this was built in, so nothing below has run
@@ -66,7 +69,7 @@ private class AndroidNodeHandle(val node: AccessibilityNodeInfo, val requiredCli
  *
  * The "no device" note above predates this project's actual device testing
  * (see the many "confirmed on-device" comments elsewhere in this file and
- * class, 24–28 Sep) and is stale for the codebase generally. For
+ * class, 24–29 Sep) and is stale for the codebase generally. For
  * SUBMIT_SEARCH/imeEnterApiSupported/nodeSupportsImeEnter/performImeEnter
  * specifically (2026-09-28): verified end-to-end on a real device (API 34)
  * against Zomato's real search field — resolve, ACTION_SET_TEXT, and
@@ -101,6 +104,9 @@ class ReplayEngine(
     // it can tell "already settled" from "hasn't started changing yet".
     private var fingerprintBeforeAction: Int? = null
 
+    // Latest semantic snapshot; nodeForElement() hands out copies from it.
+    private var lastSnapshot: ScreenSnapshot? = null
+
     // Counts actions actually PERFORMED (performClick/performSetText/
     // performScroll calls), not FlowStep.order — a step that goes Stuck
     // before an action is attempted (findNode/findNodeByValue returning
@@ -125,7 +131,15 @@ class ReplayEngine(
     // was left over from the previous step first.
     private var cachedRoot: AccessibilityNodeInfo? = null
 
-    fun replay(steps: List<FlowStep>, slotValues: Map<String, String> = emptyMap()): ReplayResult {
+    /**
+     * Blocks while the flow runs (screen waits sleep this thread), so call
+     * it off the main thread.
+     */
+    fun replay(
+        steps: List<FlowStep>,
+        slotValues: Map<String, String> = emptyMap(),
+        mode: ReplayMode = ReplayMode.EXACT
+    ): ReplayResult {
         stepCounter = 0
         cachedRoot?.recycle()
         cachedRoot = null
@@ -146,14 +160,16 @@ class ReplayEngine(
         // matches teaching's own unconditional-for-the-whole-session scope,
         // not a per-step guess.
         service.setIncludeNotImportantViewsRequested(true)
-        Log.i(TAG, "Replay starting: steps=${steps.size}")
+        Log.i(TAG, "Replay starting: mode=$mode steps=${steps.size} roles=${steps.map { it.role }}")
         return try {
             // The app may have just been launched (splash screen, feed still
             // loading): let it settle before looking for step 1.
             waitForStableScreen()
-            ReplayPlanner.replay(steps, slotValues, this)
+            ReplayPlanner.replay(steps, slotValues, this, mode)
         } finally {
             service.setIncludeNotImportantViewsRequested(false)
+            lastSnapshot?.release()
+            lastSnapshot = null
             service.setReplaying(false)
         }
     }
@@ -186,9 +202,54 @@ class ReplayEngine(
         return AndroidNodeHandle(match.node, match.requiredClimb)
     }
 
+    // NodeWalker.findBySlotValue, not findByValue: this is specifically the
+    // CLICK slot-substitution search (SlotResolver.resolveClickTarget), and
+    // NodeProvider.findNodeByValue's own contract ("no matching option ->
+    // Stuck, never fall back to findNode") depends on findBySlotValue's
+    // ClickValueMatcher-based disambiguation (case-insensitive/trimmed exact
+    // match first, contains-match only when it narrows to one candidate,
+    // ambiguous -> null) — findByValue (used by screenElements'-adjacent
+    // semantic code) is a simpler first-match lookup with no such guard and
+    // would silently reintroduce the "guess among several matches" risk
+    // ReplayPlannerTest's ambiguity tests exist to catch.
     override fun findNodeByValue(value: String): NodeHandle? {
         val node = nodeWalker.findBySlotValue(takeCachedRootOrFetch(), value) ?: return null
         return AndroidNodeHandle(node)
+    }
+
+    override fun screenElements(): List<ScreenElement> {
+        lastSnapshot?.release()
+        val snapshot = nodeWalker.snapshot(service.currentRoot())
+        lastSnapshot = snapshot
+        Log.d(TAG, "Semantic snapshot: ${snapshot.elements.size} actionable elements")
+        return snapshot.elements
+    }
+
+    override fun nodeForElement(element: ScreenElement): NodeHandle? {
+        Log.i(TAG, "Semantic match: id=${element.id} label=${element.label} cd=${element.contentDescription} resId=${element.resourceId}")
+        return lastSnapshot?.nodeCopy(element.id)?.let { AndroidNodeHandle(it) }
+    }
+
+    /**
+     * Presses the keyboard's action key (Search/Enter) on the focused
+     * input. ACTION_IME_ENTER is Android 11+. ACTION_SET_TEXT doesn't
+     * always move focus, so an unfocused lone text box is focused first.
+     */
+    override fun submitCurrentInput(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return false
+        val root = service.currentRoot() ?: return false
+        val input = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            ?: nodeWalker.snapshot(root).let { snap ->
+                val editable = snap.elements.singleOrNull { it.editable }
+                val copy = editable?.let { snap.nodeCopy(it.id) }
+                snap.release()
+                copy?.also { it.performAction(AccessibilityNodeInfo.ACTION_FOCUS) }
+            }
+            ?: return false
+        val ok = input.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)
+        Log.i(TAG, "Replay: keyboard submit on ${describe(input)} result=$ok")
+        input.recycle()
+        return ok
     }
 
     override fun awaitScreenChange() = waitForStableScreen()

@@ -36,6 +36,17 @@
             </intent-filter>
         </activity>
 
+        <!-- Nav drawer destinations (UI pass, 29 Sep 2026) -->
+        <activity
+            android:name=".ui.ThemesActivity"
+            android:exported="false"
+            android:theme="@style/Theme.Calo" />
+
+        <activity
+            android:name=".ui.SavedWorkflowsActivity"
+            android:exported="false"
+            android:theme="@style/Theme.Calo" />
+
         <service
             android:name=".accessibility.CaloAccessibilityService"
             android:exported="false"
