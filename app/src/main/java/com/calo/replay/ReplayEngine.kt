@@ -67,8 +67,27 @@ class ReplayEngine(
     // this only claims "step N fired" for a step that genuinely did.
     private var stepCounter = 0
 
+    // Perf fix (2026-09-28): ReplayPlanner calls currentScreenSignals()
+    // (the gate check) and then, for the same step, findNode()/
+    // findNodeByValue() — synchronously, on this thread, with nothing but a
+    // pure in-memory CredentialGateRules.classify() call in between (see
+    // ReplayPlanner.replay()'s loop body in :domain). There is no yield, no
+    // I/O, no chance for the live screen to change between those two calls,
+    // so the root fetched for the gate check is exactly as fresh for the
+    // node-resolution call that immediately follows it. Caching it here
+    // avoids a second rootInActiveWindow() round-trip per step — a real,
+    // measured-independent cost (separate from the tree-walk cost inside
+    // CredentialGate itself, see its own instrumentation) — without
+    // changing what either call sees. Never reused ACROSS steps: every
+    // currentScreenSignals() call (always the first call of a new step,
+    // per ReplayPlanner) fetches a fresh root and drops/recycles whatever
+    // was left over from the previous step first.
+    private var cachedRoot: AccessibilityNodeInfo? = null
+
     fun replay(steps: List<FlowStep>, slotValues: Map<String, String> = emptyMap()): ReplayResult {
         stepCounter = 0
+        cachedRoot?.recycle()
+        cachedRoot = null
         service.setReplaying(true)
         return try {
             ReplayPlanner.replay(steps, slotValues, this)
@@ -80,16 +99,33 @@ class ReplayEngine(
     private fun describe(info: AccessibilityNodeInfo): String =
         "resId=${info.viewIdResourceName} text=${info.text} cls=${info.className}"
 
-    override fun currentScreenSignals(): ScreenSignals =
-        credentialGate.extractSignals(service.currentRoot())
+    override fun currentScreenSignals(): ScreenSignals {
+        cachedRoot?.recycle()
+        val root = service.currentRoot()
+        cachedRoot = root
+        return credentialGate.extractSignals(root)
+    }
+
+    // Consumes the root cached by the currentScreenSignals() call this same
+    // step made (see cachedRoot's doc) instead of fetching a second one; if
+    // there is no cached root — findNode()/findNodeByValue() called without
+    // a preceding currentScreenSignals() this step, which never happens via
+    // ReplayPlanner today but this must never silently resolve against a
+    // stale/wrong tree if that assumption ever breaks — falls back to a
+    // fresh fetch rather than reusing something possibly stale.
+    private fun takeCachedRootOrFetch(): AccessibilityNodeInfo? {
+        val root = cachedRoot
+        cachedRoot = null
+        return root ?: service.currentRoot()
+    }
 
     override fun findNode(anchor: ElementAnchor): NodeHandle? {
-        val node = nodeWalker.resolve(service.currentRoot(), anchor) ?: return null
+        val node = nodeWalker.resolve(takeCachedRootOrFetch(), anchor) ?: return null
         return AndroidNodeHandle(node)
     }
 
     override fun findNodeByValue(value: String): NodeHandle? {
-        val node = nodeWalker.findBySlotValue(service.currentRoot(), value) ?: return null
+        val node = nodeWalker.findBySlotValue(takeCachedRootOrFetch(), value) ?: return null
         return AndroidNodeHandle(node)
     }
 
