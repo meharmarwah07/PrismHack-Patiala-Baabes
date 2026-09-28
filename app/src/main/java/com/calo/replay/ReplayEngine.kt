@@ -8,14 +8,12 @@ import com.calo.accessibility.CaloAccessibilityService
 import com.calo.accessibility.CredentialGate
 import com.calo.accessibility.NodeWalker
 import com.calo.domain.gate.ScreenSignals
-import com.calo.domain.model.ActionType
 import com.calo.domain.model.ElementAnchor
 import com.calo.domain.model.FlowStep
 import com.calo.domain.replay.NodeHandle
 import com.calo.domain.replay.NodeProvider
 import com.calo.domain.replay.ReplayPlanner
 import com.calo.domain.replay.ReplayResult
-import com.calo.domain.semantic.SemanticRole
 
 private class AndroidNodeHandle(val node: AccessibilityNodeInfo) : NodeHandle
 
@@ -127,22 +125,21 @@ class ReplayEngine(
         cachedRoot = null
         service.setReplaying(true)
         // See CaloAccessibilityService.setIncludeNotImportantViewsRequested's
-        // doc. Originally scoped to "only when a step's action is
-        // SUBMIT_SEARCH" -- confirmed too narrow on-device (2026-09-28,
-        // Zomato): a flow whose search-submit step resolved via an ordinary
-        // suggestion-row CLICK (role=SUBMIT_SEARCH, action=CLICK, taught
-        // fine since teaching now always has the flag on) still failed to
-        // resolve an EARLIER, unrelated step (the plain "open search" CLICK
-        // on search_bar_view_flipper) at replay, because THAT node is also
-        // apparently not-important-for-accessibility in Zomato's UI and the
-        // flag was off for the whole replay. Teaching has no way to predict
-        // in advance which anchors will turn out to need this, so replay
-        // can't either -- matching teach's own "on for the whole operation"
-        // scope (not globally-always-on) is the only boundary that's
-        // actually correct, not just a step-type guess that happened to
-        // work for the one field this was first found on.
-        val needsNotImportantViews = steps.any { it.action == ActionType.SUBMIT_SEARCH || it.role == SemanticRole.SUBMIT_SEARCH }
-        if (needsNotImportantViews) service.setIncludeNotImportantViewsRequested(true)
+        // doc. Tried scoping this to "only when a step's action/role is
+        // SUBMIT_SEARCH" twice, on-device (2026-09-28, Zomato), and both
+        // attempts broke on a real taught flow: a flow whose search-submit
+        // step resolved via an ordinary suggestion-row CLICK never gets
+        // labelled SUBMIT_SEARCH by RoleLabeler at all in some cases (goes
+        // straight from SEARCH_INPUT to SELECT_RESULT), so the heuristic
+        // silently misses it -- yet the EARLIER "open search" step still
+        // needs the flag, because that node is also not-important-for-
+        // accessibility in Zomato's UI. Teaching has no way to predict in
+        // advance which anchors in a flow will turn out to need this, so
+        // trying to guess it from role/action at replay time keeps failing
+        // the same way. Unconditional for the whole replay() call instead --
+        // matches teaching's own unconditional-for-the-whole-session scope,
+        // not a per-step guess.
+        service.setIncludeNotImportantViewsRequested(true)
         Log.i(TAG, "Replay starting: steps=${steps.size}")
         return try {
             // The app may have just been launched (splash screen, feed still
@@ -150,7 +147,7 @@ class ReplayEngine(
             waitForStableScreen()
             ReplayPlanner.replay(steps, slotValues, this)
         } finally {
-            if (needsNotImportantViews) service.setIncludeNotImportantViewsRequested(false)
+            service.setIncludeNotImportantViewsRequested(false)
             service.setReplaying(false)
         }
     }

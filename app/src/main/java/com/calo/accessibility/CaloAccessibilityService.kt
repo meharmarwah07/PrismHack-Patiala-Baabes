@@ -437,30 +437,33 @@ class CaloAccessibilityService : AccessibilityService() {
      * exact resourceId that's visibly on screen) — confirmed both ways,
      * on-device, before this fix.
      *
-     * NOT enabled globally: this flag widens EVERY tree walk on EVERY
-     * screen of EVERY app being taught or replayed, not just Zomato's
-     * search field — more candidates for CredentialGate's per-step scan
-     * (undoing the cachedRoot perf work), noisier candidate pools for
-     * ContextPicker/FuzzyLabel, and a real risk of resurrecting older
-     * "not important" nodes the null-source/noise-filtering fixes
-     * elsewhere in this class were specifically written to keep out.
-     * Toggled on only for the windows that actually need to see this kind
-     * of node — a full TEACHING session (recordSubmitAfterTyping needs the
+     * NOT enabled globally at all times: this flag widens EVERY tree walk
+     * on EVERY screen of EVERY app being taught or replayed — more
+     * candidates for CredentialGate's per-step scan (undoing the
+     * cachedRoot perf work), noisier candidate pools for ContextPicker/
+     * FuzzyLabel, and a real risk of resurrecting older "not important"
+     * nodes the null-source/noise-filtering fixes elsewhere in this class
+     * were specifically written to keep out. So it's toggled on only for
+     * the two OPERATIONS that actually need to see this kind of node — a
+     * full TEACHING session (recordSubmitAfterTyping needs the
      * TYPE_VIEW_TEXT_CHANGED events to arrive at all, which is continuous
      * event delivery, not a single call — see startTeaching/stopTeaching)
-     * and the WHOLE of a REPLAY whose flow involves SUBMIT_SEARCH (see
-     * ReplayEngine.replay) — not just the SUBMIT_SEARCH step itself.
-     * Confirmed on-device (2026-09-28) that scoping it to only the
-     * SUBMIT_SEARCH action's own resolve call is too narrow: a flow whose
-     * search was submitted by tapping a suggestion (role=SUBMIT_SEARCH,
-     * action=CLICK, not the new action type at all) still failed to
-     * resolve an EARLIER, unrelated step — Zomato's plain "open search"
-     * button turned out to be not-important-for-accessibility too. Since
-     * teaching now always has the flag on, there's no reliable way to
-     * predict in advance which specific anchors in a taught flow will turn
-     * out to need it at replay — so any flow that touches this feature at
-     * all gets the flag for its whole replay, same as teaching gets it for
-     * its whole session. Same setServiceInfo() mechanism as
+     * and the WHOLE of every REPLAY (see ReplayEngine.replay) — not
+     * scoped any narrower than that within either operation.
+     *
+     * Tried narrower replay-time scoping twice, on-device (2026-09-28,
+     * Zomato), and both attempts broke on a real taught flow: gating on
+     * "does any step have action/role SUBMIT_SEARCH" missed flows where
+     * RoleLabeler happened to skip that label entirely (going straight
+     * from SEARCH_INPUT to SELECT_RESULT), yet an EARLIER, unrelated step
+     * (the plain "open search" button) still needed the flag — it's also
+     * not-important-for-accessibility in Zomato's UI, unrelated to
+     * SUBMIT_SEARCH specifically. Since teaching has no way to predict in
+     * advance which anchors in a flow will turn out to need this, replay
+     * can't reliably guess it from role/action either — unconditional for
+     * the whole replay is the only boundary that actually held up, not a
+     * per-step-type heuristic that happened to work on the first flow it
+     * was tried against. Same setServiceInfo() mechanism as
      * [setTouchExplorationCapabilityRequested] above, applied to a
      * different flag for a different reason.
      */
