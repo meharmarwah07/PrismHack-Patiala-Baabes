@@ -4,9 +4,11 @@
   CaloAccessibilityService.rootInActiveWindow returns null and neither
   teaching nor replay can see any UI at all.
 
-  We do NOT set canPerformGestures="true" — everything we do (CLICK,
-  SET_TEXT, SCROLL) is a node-level AccessibilityAction, not a raw
-  gesture, so we deliberately keep the permission surface smaller.
+  canPerformGestures="true" (27 Sep 2026): replay's fallback when an
+  element ignores ACTION_CLICK and only reacts to a real touch (Zomato's
+  search box, confirmed on-device) — ReplayEngine then taps its centre via
+  dispatchGesture. Used only for that fallback, never to replace a
+  node-level action that works.
 
   canRequestTouchExplorationMode="true" (Finding 6 fallback, 2026-09-26):
   a STATIC, permanent capability declaration — required before
@@ -26,5 +28,6 @@
     android:canRetrieveWindowContent="true"
     android:canRequestFilterKeyEvents="false"
     android:canRequestTouchExplorationMode="true"
+    android:canPerformGestures="true"
     android:notificationTimeout="100"
     android:description="@string/accessibility_service_description" />

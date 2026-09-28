@@ -4,12 +4,17 @@ import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.calo.accessibility.NodeWalker
+import com.calo.accessibility.TapTiming
 import com.calo.domain.model.ActionType
 import com.calo.domain.model.ElementAnchor
 import com.calo.domain.model.FlowStep
 import com.calo.domain.teach.PostTypingTapResolver
 import com.calo.domain.teach.RawTouchCaptureGate
 import com.calo.domain.teach.ScrollCoalescer
+import com.calo.domain.semantic.RoleLabeler
+import com.calo.domain.semantic.SemanticRole
+import com.calo.domain.teach.TapDedup
+import com.calo.domain.teach.TouchClaim
 import com.calo.domain.teach.TargetPackageTracker
 import com.calo.domain.teach.TeachPackageFilter
 import com.calo.domain.teach.TextEntryCoalescer
@@ -51,6 +56,7 @@ import com.calo.domain.teach.TextEntryCoalescer
 class TeachRecorder(
     private val ownPackageName: String,
     private val launcherPackageName: String? = null,
+    private val keyboardPackageName: String? = null,
     private val nodeWalker: NodeWalker = NodeWalker()
 ) {
     private companion object {
@@ -104,6 +110,26 @@ class TeachRecorder(
     }
 
     private val steps = mutableListOf<FlowStep>()
+
+    // The step most recently committed by the raw-touch fallback, and when:
+    // a real CLICK for the same tap arriving shortly after REPLACES it
+    // instead of adding a duplicate (see TapDedup).
+    private var lastRawCommit: Pair<Int, Long>? = null
+
+    // Set by CaloAccessibilityService: true while raw touch capture is
+    // receiving touches (Android 13+, keyboard hidden). Only then can a
+    // CLICK event be checked against a real finger touch — see TouchClaim.
+    var rawTouchCaptureLive: Boolean = false
+
+    // Whether the latest touch-down already produced a recorded step.
+    private var touchClaimed = true
+
+    // Set by CaloAccessibilityService: whether the on-screen keyboard is up.
+    var keyboardVisible: Boolean = false
+
+    // When the app navigated (new window) right after typing, while the
+    // keyboard was still up — see recordSubmitAfterTyping.
+    private var navAfterTypingAtMs: Long? = null
     private var nextOrder = 1
     private var targetPackage: String? = null
 
@@ -161,7 +187,7 @@ class TeachRecorder(
     // instead of recording the wrong tap.
     private data class PendingRawTouch(val anchor: ElementAnchor, val token: Long)
     private var pendingRawTouch: PendingRawTouch? = null
-    private var nextRawTouchToken = 0L
+    private var touchSeq = 0L
 
     // Finding 6 fallback, part 2 (2026-09-26) — see onKeyboardHidden's and
     // tryResolvePostTypingTap's docs. Non-null only in the window right
@@ -188,7 +214,7 @@ class TeachRecorder(
         // this class's [launcherPackageName] section for why each is
         // excluded, and TargetPackageTracker for what happens to whatever
         // survives this filter.
-        if (TeachPackageFilter.isExcluded(eventPackage, ownPackageName, launcherPackageName)) {
+        if (TeachPackageFilter.isExcluded(eventPackage, ownPackageName, launcherPackageName, keyboardPackageName)) {
             currentRoot?.recycle()
             return
         }
@@ -201,6 +227,14 @@ class TeachRecorder(
             // just not one TeachRecorder otherwise acts on — see the `when`
             // block's `else -> Unit`).
             tryResolvePostTypingTap(currentRoot, eventPackage)
+            if (lastTextEntryStepIndex != null) {
+                // Still nothing recorded for whatever left the typing screen.
+                if (keyboardVisible) {
+                    navAfterTypingAtMs = System.currentTimeMillis() // decided when the keyboard hides
+                } else {
+                    recordSubmitAfterTyping(eventPackage, "new screen after typing")
+                }
+            }
         }
 
         val source = event.source
@@ -243,7 +277,7 @@ class TeachRecorder(
                 AccessibilityEvent.TYPE_VIEW_CLICKED -> {
                     lastTextEntryAnchor = null // a tap ends any in-progress text entry burst
                     lastTextEntryStepIndex = null
-                    pendingRawTouch = null // a real CLICK arrived — the Finding 6 fallback isn't needed for this tap
+                    // pendingRawTouch is cleared in appendRealClick, only if this CLICK is actually recorded
                     latchTargetPackage(eventPackage)
                     val anchor = anchorFor(source)
                     // Separate from the null-source recovery below: even
@@ -261,7 +295,7 @@ class TeachRecorder(
                     val displayLabel = if (anchor.text.isNullOrBlank()) {
                         event.text.orEmpty().map { it.toString() }.firstOrNull { it.isNotBlank() }
                     } else null
-                    steps += FlowStep(order = nextOrder++, action = ActionType.CLICK, target = anchor, recordedValue = displayLabel)
+                    appendRealClick(FlowStep(order = nextOrder++, action = ActionType.CLICK, target = anchor, recordedValue = displayLabel))
                     logIfLowConfidenceClick(anchor, "real CLICK event")
                 }
 
@@ -427,7 +461,13 @@ class TeachRecorder(
             text = node.text?.toString(),
             contentDescription = node.contentDescription?.toString(),
             className = node.className?.toString(),
-            indexInParent = indexInParent
+            indexInParent = indexInParent,
+            hintText = node.hintText?.toString(),
+            // Tells identical list buttons apart at replay (ContextPicker).
+            // Not for text fields or lists: their surrounding text changes
+            // with every keystroke/scroll, which would break the same-field
+            // and same-scroll coalescing that compares anchors.
+            contextLabel = if (node.isEditable || node.isScrollable) null else nodeWalker.contextLabelFor(node)
         )
     }
 
@@ -526,7 +566,7 @@ class TeachRecorder(
     private fun recordClickWithoutSource(event: AccessibilityEvent) {
         lastTextEntryAnchor = null // a tap (recovered or not) ends any in-progress text entry burst
         lastTextEntryStepIndex = null
-        pendingRawTouch = null // a real (if source-null) CLICK arrived — the Finding 6 fallback isn't needed for this tap
+        // pendingRawTouch is cleared in appendRealClick, only if this CLICK is actually recorded
 
         val eventPackage = event.packageName?.toString()
         if (goodRootHistory.isEmpty()) {
@@ -594,7 +634,7 @@ class TeachRecorder(
                 // Settings row this way went straight to the save dialog, no
                 // slot-promotion step offered at all).
                 val chosenAnchor = anchorFor(chosen)
-                steps += FlowStep(order = nextOrder++, action = ActionType.CLICK, target = chosenAnchor, recordedValue = segment)
+                appendRealClick(FlowStep(order = nextOrder++, action = ActionType.CLICK, target = chosenAnchor, recordedValue = segment))
                 logIfLowConfidenceClick(chosenAnchor, "null-source CLICK recovery")
                 candidates.forEach { it.recycle() }
                 return
@@ -660,10 +700,18 @@ class TeachRecorder(
     private fun countVisibleTextNodes(node: AccessibilityNodeInfo, limit: Int): Int {
         var count = if (!node.text.isNullOrBlank() || !node.contentDescription.isNullOrBlank()) 1 else 0
         for (i in 0 until node.childCount) {
+            // Breaks out entirely once the limit is hit, rather than only
+            // skipping the recursive descent (2026-09-26, real ANR #2): a
+            // wide node — Zomato's home screen flattens large lists/grids
+            // into hundreds of direct accessibility children — still paid
+            // one getChild() Binder round-trip per remaining sibling even
+            // past the limit, which is the same per-node IPC cost the
+            // original ANR was caused by, just no longer compounded by
+            // depth. Confirmed via a second on-device ANR trace, same
+            // stack, after the depth-only fix was already live.
+            if (count >= limit) break
             val child = node.getChild(i) ?: continue
-            if (count < limit) {
-                count += countVisibleTextNodes(child, limit - count)
-            }
+            count += countVisibleTextNodes(child, limit - count)
             child.recycle()
         }
         return count
@@ -697,7 +745,44 @@ class TeachRecorder(
      * this keyboard-hide was actually caused by a tap worth recovering.
      */
     fun onKeyboardHidden() {
-        lastKeyboardHideAtMs = System.currentTimeMillis()
+        val now = System.currentTimeMillis()
+        lastKeyboardHideAtMs = now
+        val navAt = navAfterTypingAtMs
+        navAfterTypingAtMs = null
+        if (navAt != null && now - navAt <= POST_TYPING_TAP_WINDOW_MS) {
+            recordSubmitAfterTyping(targetPackage, "keyboard closed after a new screen")
+        }
+    }
+
+    /**
+     * Confirmed on-device (Zomato, 27 Sep 2026): after typing "Burger King",
+     * the tap on the result was made with the keyboard still up — touch
+     * capture is off then (it breaks typing), Zomato sends no CLICK event,
+     * and the post-typing title match above never ran because Zomato's new
+     * screen arrives BEFORE the keyboard finishes closing. The flow was
+     * saved with no step between typing and the restaurant's menu.
+     *
+     * So when a SEARCH box was the last thing typed into and the app then
+     * moved to a new screen with no tap recorded, record "submit this
+     * search" in its place: a CLICK with no element anchor and the typed
+     * query as its value. RoleLabeler labels it SUBMIT_SEARCH, and replay
+     * grounds it by role — the result matching the query, or the
+     * keyboard's search key. Not done for other text boxes (a note, an
+     * address): there the next screen isn't a search result.
+     */
+    private fun recordSubmitAfterTyping(actionPackage: String?, why: String) {
+        val index = lastTextEntryStepIndex ?: return
+        val typed = steps.getOrNull(index)?.recordedValue?.takeIf { it.isNotBlank() } ?: return
+        val typedOrder = steps[index].order
+        val isSearch = RoleLabeler.label(steps).firstOrNull { it.order == typedOrder }?.role == SemanticRole.SEARCH_INPUT
+        if (!isSearch) return
+
+        lastTextEntryAnchor = null
+        lastTextEntryStepIndex = null
+        pendingRawTouch = null
+        if (actionPackage != null) latchTargetPackage(actionPackage)
+        steps += FlowStep(order = nextOrder++, action = ActionType.CLICK, target = ElementAnchor(), recordedValue = typed)
+        Log.i(TAG, "Recorded 'submit search' after typing \"$typed\" ($why): no tap was captured while the keyboard was up")
     }
 
     /**
@@ -802,28 +887,88 @@ class TeachRecorder(
      * (CaloAccessibilityService) needs it for its own CredentialGate check
      * before calling this and must recycle it itself afterwards.
      */
-    fun onRawTouchDown(
+    /**
+     * Step 1 of a raw touch, on the main thread the instant the finger goes
+     * down: only records THAT a touch happened (for TouchClaim) and returns
+     * its token. Must stay cheap — see CaloAccessibilityService
+     * .handleRawTouchDown for why nothing slow may run before the touch is
+     * handed to the app.
+     */
+    fun markTouchDown(): Long {
+        lastRawTouchDownAtMs = System.currentTimeMillis()
+        touchClaimed = false
+        pendingRawTouch = null
+        return ++touchSeq
+    }
+
+    /**
+     * Cheap staleness check for [token], read from [touchWorker]'s queue
+     * BEFORE paying for the expensive element lookup (resolveTouchAnchor).
+     * Confirmed on-device (27 Sep 2026): touchWorker is single-threaded, and
+     * that lookup alone can take multiple seconds under load — tapping
+     * again while one is still in flight (a completely natural reaction
+     * when nothing seems to happen) queues the new touch behind it rather
+     * than racing it. [offerRawTouch] already discards a resolved-but-stale
+     * result the same way; this just skips the wasted work for a touch that
+     * was going to be thrown away anyway, so the queue can catch up to
+     * whichever touch is actually current instead of resolving every
+     * superseded one in full, one at a time.
+     */
+    fun isLatestTouch(token: Long): Boolean = token == touchSeq
+
+    /**
+     * Step 2, on a BACKGROUND thread: works out which element is under
+     * ([x], [y]) and builds its anchor. Reads no recorder state and changes
+     * none, so it's safe off the main thread. Null if the touch shouldn't
+     * be recorded (Calo/launcher, gated screen, keyboard up, nothing there).
+     * [root] is borrowed.
+     */
+    fun resolveTouchAnchor(
         x: Int,
         y: Int,
         root: AccessibilityNodeInfo?,
         credentialGateClear: Boolean,
-        keyboardVisible: Boolean
-    ): Long? {
-        lastRawTouchDownAtMs = System.currentTimeMillis()
+        touchOnKeyboard: Boolean,
+        timing: TapTiming? = null
+    ): ElementAnchor? {
         if (root == null) return null
-        if (TeachPackageFilter.isExcluded(root.packageName?.toString(), ownPackageName, launcherPackageName)) return null
-        if (!RawTouchCaptureGate.isCaptureAllowed(credentialGateClear, keyboardVisible)) return null
-
-        val node = nodeWalker.findClickableAtPoint(root, x, y) ?: return null
-        val anchor = try {
-            anchorWithDescendantTextFallback(node)
+        if (TeachPackageFilter.isExcluded(root.packageName?.toString(), ownPackageName, launcherPackageName, keyboardPackageName)) return null
+        if (!RawTouchCaptureGate.isCaptureAllowed(credentialGateClear, touchOnKeyboard)) return null
+        val traversalStart = System.nanoTime()
+        val node = nodeWalker.findClickableAtPoint(root, x, y, timing)
+        timing?.let { it.traversalNanos = System.nanoTime() - traversalStart }
+        if (node == null) return null
+        return try {
+            val semanticStart = System.nanoTime()
+            val result = anchorWithDescendantTextFallback(node)
+            timing?.let { it.semanticNanos = System.nanoTime() - semanticStart }
+            result
         } finally {
             node.recycle()
         }
+    }
 
-        val token = nextRawTouchToken++
+    /**
+     * Step 3, back on the main thread: keeps the resolved anchor as the
+     * pending raw-touch candidate — unless a newer touch has started, or a
+     * real CLICK event already recorded this tap while step 2 ran. Returns
+     * whether a candidate is now pending (and so needs a commit scheduled).
+     */
+    /**
+     * The touch [token] turned out to be a swipe or long-press, not a tap
+     * (see TapGesture): record nothing for it, and don't let a CLICK event
+     * claim it either.
+     */
+    fun discardTouch(token: Long) {
+        if (token != touchSeq) return
+        pendingRawTouch = null
+        touchClaimed = true
+    }
+
+    fun offerRawTouch(token: Long, anchor: ElementAnchor?): Boolean {
+        if (anchor == null || token != touchSeq || touchClaimed) return false
         pendingRawTouch = PendingRawTouch(anchor, token)
-        return token
+        return true
     }
 
     /**
@@ -843,6 +988,8 @@ class TeachRecorder(
         lastTextEntryStepIndex = null
         if (actionPackage != null) latchTargetPackage(actionPackage)
         steps += FlowStep(order = nextOrder++, action = ActionType.CLICK, target = pending.anchor, recordedValue = null)
+        lastRawCommit = steps.lastIndex to System.currentTimeMillis()
+        touchClaimed = true
         logIfLowConfidenceClick(pending.anchor, "raw-touch-down resolution")
         Log.i(TAG, "Committed Finding-6 raw-touch CLICK: resourceId=${pending.anchor.resourceId} text=${pending.anchor.text} contentDescription=${pending.anchor.contentDescription}")
     }
@@ -854,7 +1001,49 @@ class TeachRecorder(
         steps[index] = steps[index].copy(slotName = slotName)
     }
 
+    /**
+     * Appends a CLICK from a real click event — unless the raw-touch
+     * fallback already recorded this same tap moments ago (its commit timer
+     * can fire before the app's own click event arrives), in which case the
+     * real one replaces it: one physical tap, one step.
+     */
+    private fun appendRealClick(step: FlowStep) {
+        val now = System.currentTimeMillis()
+        val raw = lastRawCommit
+        lastRawCommit = null
+        if (raw != null && raw.first == steps.lastIndex &&
+            TapDedup.isSameTap(steps[raw.first].target, raw.second, step.target, now)
+        ) {
+            steps[raw.first] = step.copy(order = steps[raw.first].order)
+            nextOrder = step.order // the merged step reuses the earlier order number
+            pendingRawTouch = null
+            Log.i(TAG, "Merged real CLICK into the raw-touch step just recorded for the same tap (order ${steps[raw.first].order})")
+            return
+        }
+        if (!TouchClaim.canClaim(rawTouchCaptureLive, touchClaimed, lastRawTouchDownAtMs, now)) {
+            nextOrder = step.order // nothing recorded, give the number back
+            Log.i(TAG, "Dropped CLICK with no unclaimed finger touch behind it (app-generated, or a second event for one tap): resourceId=${step.target.resourceId} text=${step.target.text} contentDescription=${step.target.contentDescription}")
+            return
+        }
+        touchClaimed = true
+        // A real CLICK was recorded for this tap: the raw-touch fallback isn't needed.
+        pendingRawTouch = null
+        steps += step
+    }
+
     fun currentSteps(): List<FlowStep> = steps.toList()
+
+    /**
+     * Re-loads a teaching session's steps from TeachCheckpoint after the
+     * process was killed mid-teach, so the new recorder continues where the
+     * old one stopped instead of starting from nothing.
+     */
+    fun restore(savedSteps: List<FlowStep>, savedTargetPackage: String?) {
+        steps.clear()
+        steps += savedSteps
+        nextOrder = (savedSteps.maxOfOrNull { it.order } ?: 0) + 1
+        targetPackage = savedTargetPackage
+    }
 
     fun currentTargetPackage(): String? = targetPackage
 

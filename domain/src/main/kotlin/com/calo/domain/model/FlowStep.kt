@@ -1,5 +1,6 @@
 package com.calo.domain.model
 
+import com.calo.domain.semantic.SemanticRole
 import kotlinx.serialization.Serializable
 
 enum class ActionType {
@@ -21,5 +22,12 @@ data class FlowStep(
     val action: ActionType,
     val target: ElementAnchor,
     val recordedValue: String? = null, // literal value seen during teaching (for SET_TEXT)
-    val slotName: String? = null       // if non-null, overrides recordedValue at replay time
+    val slotName: String? = null,      // if non-null, overrides recordedValue at replay time
+    // What this step MEANS (search, add to cart, ...), assigned after
+    // teaching by RoleLabeler. Null = no recognised meaning: the step still
+    // replays exactly on its own app, but can't be carried to another app.
+    // Defaulted so flows saved before this field existed still decode.
+    val role: SemanticRole? = null,
+    // For SELECT_RESULT only: which matching result to pick, 1-based.
+    val roleIndex: Int? = null
 )

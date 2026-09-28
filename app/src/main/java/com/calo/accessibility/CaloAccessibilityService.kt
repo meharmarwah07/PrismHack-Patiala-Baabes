@@ -1,4 +1,4 @@
-﻿package com.calo.accessibility
+package com.calo.accessibility
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
@@ -17,7 +17,10 @@ import android.view.accessibility.AccessibilityWindowInfo
 import com.calo.BuildConfig
 import com.calo.domain.gate.GateVerdict
 import com.calo.domain.teach.RawTouchCaptureGate
+import com.calo.domain.teach.TapGesture
 import com.calo.orchestrator.CaloOrchestrator
+import com.calo.domain.model.FlowStep
+import com.calo.teach.TeachCheckpoint
 import com.calo.teach.TeachRecorder
 
 class CaloAccessibilityService : AccessibilityService() {
@@ -38,6 +41,12 @@ class CaloAccessibilityService : AccessibilityService() {
         // into the NEXT tap's territory.
         private const val RAW_TOUCH_COMMIT_DELAY_MS = 300L
 
+        // The commit delay above counts from the finger coming UP (when the
+        // app's real click event fires), not going down — counting from
+        // DOWN recorded most Zomato taps twice (27 Sep 2026). If no UP is
+        // ever seen, commit anyway this long after DOWN.
+        private const val RAW_TOUCH_NO_UP_TIMEOUT_MS = 1500L
+
         // Safety net for touch capture's lifecycle (condition 1): if
         // stopTeaching()/onDestroy()/onInterrupt() are somehow all missed
         // (a wedged UI, a crash mid-teardown), this guarantees touch
@@ -53,13 +62,48 @@ class CaloAccessibilityService : AccessibilityService() {
         // re-registered every time the capability re-engages (see
         // registerTouchCaptureCallback's doc) — the original registration
         // goes stale across a capability off/on cycle.
+        //
+        // 27 Sep 2026: tried OFF (capture kept on while the keyboard is up,
+        // to record suggestion/result taps made with the keyboard showing).
+        // Confirmed on-device that typing broke again even with the
+        // delegation delay fixed, so it stays ON: touch exploration is
+        // always released while the keyboard is visible. Taps made in that
+        // time are recovered by TeachRecorder's post-typing-tap path.
         private const val KEYBOARD_RELEASE_TOGGLE_ENABLED = true
+
+        // A teach session interrupted by a process kill is resumed on
+        // reconnect only if it was last touched this recently; an older one
+        // is abandoned rather than surprising the user with teaching mode.
+        private const val RESUME_TEACHING_MAX_AGE_MS = 30 * 60 * 1000L
     }
 
     var mode: Mode = Mode.IDLE
         private set
 
     private var teachRecorder: TeachRecorder? = null
+    private var pendingRawCommit: Runnable? = null
+
+    // Touch-down work (reading the whole screen) runs here, never on the
+    // main thread — see handleRawTouchDown.
+    private val touchWorker = java.util.concurrent.Executors.newSingleThreadExecutor()
+    private var lastTouchUpAtMs = 0L
+
+    // Diagnostic-only (27 Sep 2026, tap-freeze investigation): tracks how
+    // many tap-resolution jobs are submitted-but-not-yet-fully-finished on
+    // [touchWorker] at any moment, purely for the structured timing record
+    // in handleRawTouchDown — not used for any control-flow decision.
+    private val touchQueueDepth = java.util.concurrent.atomic.AtomicInteger(0)
+    private val tapIdCounter = java.util.concurrent.atomic.AtomicLong(0)
+
+    // The current finger gesture, to tell a tap from a swipe/long-press.
+    private var gestureToken: Long? = null
+    private var gestureDownX = 0f
+    private var gestureDownY = 0f
+    private var gestureDownAtMs = 0L
+    private var gestureMaxDistance = 0f
+    private var gestureNotTap = false
+    private lateinit var teachCheckpoint: TeachCheckpoint
+    private var lastCheckpointed: Pair<List<FlowStep>, String?>? = null
 
     private val handler = Handler(Looper.getMainLooper())
     private val credentialGate = CredentialGate(packageName = { currentPackageName() })
@@ -80,10 +124,51 @@ class CaloAccessibilityService : AccessibilityService() {
         super.onServiceConnected()
         instance = this
         orchestrator = CaloOrchestrator(applicationContext)
+        // Confirmed on-device (2026-09-26): if this process is killed while
+        // touch exploration is armed (background-app killer, not a clean
+        // stopTeaching()/onDestroy()), the system can leave the capability
+        // flag stuck ON for the NEXT process instance, with no
+        // TouchInteractionController/callback alive to ever call
+        // requestDelegating() for it — every tap then falls back to raw
+        // touch-exploration semantics (tap to focus, second tap to
+        // activate) with no way to self-heal. The existing watchdog
+        // (TOUCH_CAPTURE_WATCHDOG_MS) can't help here: it's a Handler
+        // callback that dies along with the process it was scheduled on.
+        // A fresh connection should never start armed, so defensively
+        // clear it every time regardless of what the previous instance left
+        // behind.
+        setTouchExplorationCapabilityRequested(false)
+
+        teachCheckpoint = TeachCheckpoint(this)
+        // Posted so the connection is fully set up before touch capture is
+        // re-armed.
+        handler.post { resumeInterruptedTeaching() }
+    }
+
+    /**
+     * If this process replaced one that was killed mid-teach (see
+     * TeachCheckpoint's doc), carry on teaching with the steps recorded so
+     * far, so the user's "Finish Teaching" still saves the whole flow.
+     */
+    private fun resumeInterruptedTeaching() {
+        if (mode == Mode.TEACHING) return
+        val saved = teachCheckpoint.load(RESUME_TEACHING_MAX_AGE_MS) ?: return
+        android.util.Log.w("Calo", "Resuming a teaching session interrupted by a process restart: ${saved.steps.size} step(s) recovered, targetPackage=${saved.targetPackage}")
+        startTeaching(restoreFrom = saved)
+    }
+
+    /** Writes the recorder's steps to disk if they changed since the last write. */
+    private fun checkpointTeaching() {
+        val recorder = teachRecorder ?: return
+        val current = recorder.currentSteps() to recorder.currentTargetPackage()
+        if (current == lastCheckpointed) return
+        teachCheckpoint.save(current.first, current.second)
+        lastCheckpointed = current
     }
 
     override fun onDestroy() {
         stopRawTouchCapture()
+        touchWorker.shutdownNow()
         if (::orchestrator.isInitialized) {
             orchestrator.shutdown()
         }
@@ -98,7 +183,10 @@ class CaloAccessibilityService : AccessibilityService() {
         }
         if (mode == Mode.TEACHING) {
             logRawEventForTeachDebugging(event)
+            teachRecorder?.rawTouchCaptureLive = touchInteractionController != null && !keyboardVisible
+            teachRecorder?.keyboardVisible = keyboardVisible
             teachRecorder?.onAccessibilityEvent(event, currentRoot())
+            checkpointTeaching()
         }
     }
 
@@ -136,6 +224,7 @@ class CaloAccessibilityService : AccessibilityService() {
             "[$start] Keyboard visible=$nowVisible -> touch exploration capability requested=${!nowVisible} (setServiceInfo took ${elapsedMs}ms) isTouchExplorationEnabled(system)=${accessibilityManager.isTouchExplorationEnabled}"
         )
 
+        teachRecorder?.keyboardVisible = nowVisible
         if (!nowVisible) {
             teachRecorder?.onKeyboardHidden()
             // Re-obtains a fresh controller and registers a new callback —
@@ -191,7 +280,7 @@ class CaloAccessibilityService : AccessibilityService() {
         stopRawTouchCapture()
     }
 
-    fun startTeaching(): TeachRecorder {
+    fun startTeaching(restoreFrom: TeachCheckpoint.Saved? = null): TeachRecorder {
         // packageName (from Context/ContextWrapper) rather than a literal
         // "com.calo": always matches whatever this build actually installed
         // as, and is what TeachRecorder filters its own UI's events by —
@@ -209,23 +298,39 @@ class CaloAccessibilityService : AccessibilityService() {
         // physical device (e.g. the judges') with a different launcher
         // package than whatever this dev phone happens to ship.
         val launcherPackageName = resolveLauncherPackageName()
-        val recorder = TeachRecorder(ownPackageName = packageName, launcherPackageName = launcherPackageName)
+        // Current keyboard app ("com.google.android.inputmethod.latin/.LatinIME" -> its package).
+        val keyboardPackageName = android.provider.Settings.Secure
+            .getString(contentResolver, android.provider.Settings.Secure.DEFAULT_INPUT_METHOD)
+            ?.substringBefore('/')
+        val recorder = TeachRecorder(
+            ownPackageName = packageName,
+            launcherPackageName = launcherPackageName,
+            keyboardPackageName = keyboardPackageName
+        )
         // Eager seed for the null-source CLICK recovery cache: without
         // this, the very first event of a session — which can itself be a
         // null-source CLICK, confirmed on-device — has nothing to fall
         // back on yet. See TeachRecorder.seedRoot's doc.
         recorder.seedRoot(currentRoot())
+        restoreFrom?.let { recorder.restore(it.steps, it.targetPackage) }
         teachRecorder = recorder
         mode = Mode.TEACHING
+        // Written straight away, even with zero steps: the file existing is
+        // what marks "teaching in progress" for a restarted process.
+        lastCheckpointed = null
+        checkpointTeaching()
         startRawTouchCapture()
         return recorder
     }
 
     fun stopTeaching(): TeachRecorder? {
+        flushPendingRawCommit() // the last tap before Finish still counts
         stopRawTouchCapture()
         val recorder = teachRecorder
         teachRecorder = null
         mode = Mode.IDLE
+        teachCheckpoint.clear()
+        lastCheckpointed = null
         recorder?.release()
         return recorder
     }
@@ -235,6 +340,34 @@ class CaloAccessibilityService : AccessibilityService() {
     }
 
     fun currentRoot(): AccessibilityNodeInfo? = rootInActiveWindow
+
+    /**
+     * Taps the screen at ([x], [y]) like a finger. Replay's fallback for
+     * elements that ignore ACTION_CLICK and only react to a real touch
+     * (confirmed on-device: Zomato's search-page search box, 27 Sep 2026).
+     * Blocks until the gesture finishes, so call it off the main thread.
+     */
+    fun tapAt(x: Float, y: Float): Boolean {
+        val path = android.graphics.Path().apply { moveTo(x, y) }
+        val gesture = android.accessibilityservice.GestureDescription.Builder()
+            .addStroke(android.accessibilityservice.GestureDescription.StrokeDescription(path, 0, 60))
+            .build()
+        val done = java.util.concurrent.CountDownLatch(1)
+        var completed = false
+        val dispatched = dispatchGesture(gesture, object : GestureResultCallback() {
+            override fun onCompleted(gestureDescription: android.accessibilityservice.GestureDescription?) {
+                completed = true
+                done.countDown()
+            }
+
+            override fun onCancelled(gestureDescription: android.accessibilityservice.GestureDescription?) {
+                done.countDown()
+            }
+        }, handler)
+        if (!dispatched) return false
+        done.await(2, java.util.concurrent.TimeUnit.SECONDS)
+        return completed
+    }
 
     fun currentPackageName(): String = rootInActiveWindow?.packageName?.toString() ?: ""
 
@@ -337,6 +470,30 @@ class CaloAccessibilityService : AccessibilityService() {
         val controller = getTouchInteractionController(Display.DEFAULT_DISPLAY)
         val callback = object : TouchInteractionController.Callback {
             override fun onMotionEvent(event: MotionEvent) {
+                // FIRST, before anything else: hand the touch to the app.
+                // Confirmed on-device (27 Sep 2026): doing the screen lookup
+                // before this held the touch back long enough that a tap on
+                // the Zomato icon arrived as a long-press (icon menu opened)
+                // and buttons needed a second tap. requestDelegating() is
+                // only a valid transition from STATE_TOUCH_INTERACTING —
+                // calling it in STATE_DELEGATING throws (see below).
+                // Diagnostic-only (27 Sep 2026): state read immediately
+                // before and after the delegation request, for the tap-
+                // freeze investigation's structured timing record — answers
+                // whether requestDelegating() is even being called, and
+                // whether the state reflects the change synchronously.
+                val stateBeforeDelegating = controller.state
+                if (stateBeforeDelegating == TouchInteractionController.STATE_TOUCH_INTERACTING) {
+                    controller.requestDelegating()
+                }
+                val stateAfterDelegating = controller.state
+                if (BuildConfig.DEBUG && event.actionMasked == MotionEvent.ACTION_DOWN) {
+                    android.util.Log.d(
+                        "CaloTapTiming",
+                        "delegation stateBefore=${TouchInteractionController.stateToString(stateBeforeDelegating)} " +
+                            "stateAfter=${TouchInteractionController.stateToString(stateAfterDelegating)}"
+                    )
+                }
                 // Idle-based, not "5 minutes from teach start": a real
                 // teach session pauses (reading a menu, deciding what to
                 // tap next) far longer than 5 minutes sometimes; only
@@ -353,7 +510,22 @@ class CaloAccessibilityService : AccessibilityService() {
                     )
                 }
                 if (event.actionMasked == MotionEvent.ACTION_DOWN) {
-                    handleRawTouchDown(event.rawX, event.rawY)
+                    handleRawTouchDown(event.rawX, event.rawY, stateBeforeDelegating)
+                }
+                if (event.actionMasked == MotionEvent.ACTION_MOVE) {
+                    trackGestureMove(event.rawX, event.rawY)
+                }
+                if (event.actionMasked == MotionEvent.ACTION_UP || event.actionMasked == MotionEvent.ACTION_CANCEL) {
+                    lastTouchUpAtMs = System.currentTimeMillis()
+                    trackGestureMove(event.rawX, event.rawY)
+                    if (!gestureNotTap && lastTouchUpAtMs - gestureDownAtMs >= android.view.ViewConfiguration.getLongPressTimeout()) {
+                        markGestureNotTap("held ${lastTouchUpAtMs - gestureDownAtMs}ms")
+                    }
+                    if (gestureNotTap) return
+                    pendingRawCommit?.let {
+                        handler.removeCallbacks(it)
+                        handler.postDelayed(it, RAW_TOUCH_COMMIT_DELAY_MS)
+                    }
                 }
                 // Confirmed on-device (2026-09-26): requestDelegating() is
                 // only a valid state TRANSITION from STATE_TOUCH_INTERACTING
@@ -366,9 +538,6 @@ class CaloAccessibilityService : AccessibilityService() {
                 // this guard — not "call once on ACTION_DOWN only" — is the
                 // actual fix; the framework, not us, decides how many calls
                 // one interaction produces.
-                if (controller.state == TouchInteractionController.STATE_TOUCH_INTERACTING) {
-                    controller.requestDelegating()
-                }
             }
 
             override fun onStateChanged(state: Int) {
@@ -393,6 +562,8 @@ class CaloAccessibilityService : AccessibilityService() {
 
     private fun stopRawTouchCapture() {
         handler.removeCallbacks(touchCaptureWatchdog)
+        pendingRawCommit?.let { handler.removeCallbacks(it) }
+        pendingRawCommit = null
         touchCaptureCallback?.let { touchInteractionController?.unregisterCallback(it) }
         touchInteractionController = null
         touchCaptureCallback = null
@@ -401,28 +572,159 @@ class CaloAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * Reads the current screen once (CredentialGate signals + keyboard
-     * visibility) and hands the touch-down off to TeachRecorder, which
-     * decides everything else (exclusion, gating, node resolution). The
-     * actual FlowStep is committed later, via [commitRawTouchIfStillPending]
-     * scheduled here — see TeachRecorder.onRawTouchDown's doc for why this
-     * can't be a single synchronous step.
+     * A finger went down during teaching. The touch has ALREADY been handed
+     * to the app (onMotionEvent delegates first); this only records it.
+     *
+     * Working out which element is under the finger means reading the
+     * whole screen (credential check + smallest-element lookup + the row
+     * text around it), which takes long enough to hold the touch back if
+     * done on the main thread — so it runs on [touchWorker], started right
+     * away so it still sees the screen as it was when the finger landed.
+     * The result is handed back to the main thread, where TeachRecorder
+     * drops it if a real CLICK event already recorded this tap meanwhile.
+     * The commit happens RAW_TOUCH_COMMIT_DELAY_MS after the finger lifts
+     * (or RAW_TOUCH_NO_UP_TIMEOUT_MS after it went down, if no lift is seen).
      */
-    private fun handleRawTouchDown(rawX: Float, rawY: Float) {
+    private fun handleRawTouchDown(rawX: Float, rawY: Float, controllerStateBefore: Int) {
         val recorder = teachRecorder ?: return
-        val root = currentRoot()
-        try {
-            val credentialGateClear = credentialGate.check(root) is GateVerdict.Clear
-            val keyboardVisible = windows.any { it.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD }
-            val actionPackage = root?.packageName?.toString()
-            val token = recorder.onRawTouchDown(rawX.toInt(), rawY.toInt(), root, credentialGateClear, keyboardVisible)
-            if (BuildConfig.DEBUG) {
-                android.util.Log.d("CaloTouchCapture", "onRawTouchDown x=${rawX.toInt()} y=${rawY.toInt()} pkg=$actionPackage gateClear=$credentialGateClear keyboardVisible=$keyboardVisible -> token=$token")
+        // A new touch means the previous tap is over: save it now rather
+        // than drop it. Confirmed on-device (27 Sep): a checkout tap was
+        // lost because the next touch arrived before its commit timer.
+        flushPendingRawCommit()
+        val token = recorder.markTouchDown()
+        val downAtMs = System.currentTimeMillis()
+        gestureToken = token
+        gestureDownX = rawX
+        gestureDownY = rawY
+        gestureDownAtMs = downAtMs
+        gestureMaxDistance = 0f
+        gestureNotTap = false
+
+        // Diagnostic-only (27 Sep 2026, tap-freeze investigation): one
+        // structured record per tap, per Step 1 of the instrumentation
+        // plan. All nanoTime() reads and the eventual log call are
+        // unconditional-cost-free when not BuildConfig.DEBUG (a few field
+        // writes), and formatting/logging happens exactly once, after
+        // resolution is fully done — never inline mid-measurement, so the
+        // instrumentation itself can't inflate what it's measuring.
+        val tapId = tapIdCounter.incrementAndGet()
+        val submittedAtNanos = System.nanoTime()
+        val queueDepthAtArrival = touchQueueDepth.incrementAndGet()
+
+        touchWorker.execute {
+            val startedAtNanos = System.nanoTime()
+            val queueDepthAtStart = touchQueueDepth.get()
+            val threadName = Thread.currentThread().name
+            // Confirmed on-device (27 Sep 2026): touchWorker is single-
+            // threaded, and the element lookup below can take multiple
+            // seconds under load. Tapping again while one is still queued
+            // (a natural reaction when nothing seems to happen) used to
+            // still pay for a full lookup on this now-superseded touch
+            // before even checking it was already stale — wasting the
+            // exact time budget needed to catch up to the touch that
+            // actually matters. Bail out first, cheaply, before doing any
+            // of that work.
+            if (!recorder.isLatestTouch(token)) {
+                touchQueueDepth.decrementAndGet()
+                return@execute
             }
-            if (token == null) return
-            handler.postDelayed({ recorder.commitRawTouchIfStillPending(token, actionPackage) }, RAW_TOUCH_COMMIT_DELAY_MS)
-        } finally {
-            root?.recycle()
+            val rootAcquireStart = System.nanoTime()
+            val root = currentRoot()
+            val rootAcquireNanos = System.nanoTime() - rootAcquireStart
+            try {
+                // Element lookup first — it's the part racing the screen
+                // changing under it. The gate verdict is applied after.
+                val actionPackage = root?.packageName?.toString()
+                val touchOnKeyboard = isOnKeyboard(rawX.toInt(), rawY.toInt())
+                val timing = if (BuildConfig.DEBUG) TapTiming() else null
+                val candidate = recorder.resolveTouchAnchor(rawX.toInt(), rawY.toInt(), root, credentialGateClear = true, touchOnKeyboard = touchOnKeyboard, timing = timing)
+                val credentialGateStart = System.nanoTime()
+                val credentialGateClear = candidate == null || credentialGate.check(root) is GateVerdict.Clear
+                val credentialGateNanos = System.nanoTime() - credentialGateStart
+                val anchor = candidate.takeIf { credentialGateClear }
+                if (BuildConfig.DEBUG) {
+                    val totalResolutionMs = (System.nanoTime() - startedAtNanos) / 1_000_000.0
+                    android.util.Log.d(
+                        "CaloTapTiming",
+                        "tapId=$tapId thread=$threadName controllerStateBefore=${TouchInteractionController.stateToString(controllerStateBefore)} " +
+                            "queueWaitMs=${(startedAtNanos - submittedAtNanos) / 1_000_000.0} queueDepthAtArrival=$queueDepthAtArrival queueDepthAtStart=$queueDepthAtStart " +
+                            "rootAcquireMs=${rootAcquireNanos / 1_000_000.0} " +
+                            "boundsCalls=${timing?.boundsCalls ?: -1} boundsTotalMs=${(timing?.boundsTotalNanos ?: 0) / 1_000_000.0} " +
+                            "traversalMs=${(timing?.traversalNanos ?: 0) / 1_000_000.0} semanticCheckMs=${(timing?.semanticNanos ?: 0) / 1_000_000.0} " +
+                            "credentialGateMs=${credentialGateNanos / 1_000_000.0} totalResolutionMs=$totalResolutionMs " +
+                            "x=${rawX.toInt()} y=${rawY.toInt()} pkg=$actionPackage gateClear=$credentialGateClear onKeyboard=$touchOnKeyboard -> anchor=$anchor"
+                    )
+                }
+                handler.post { offerRawTouch(recorder, token, anchor, actionPackage, downAtMs) }
+            } catch (e: Exception) {
+                android.util.Log.w("Calo", "Couldn't resolve raw touch", e)
+            } finally {
+                touchQueueDepth.decrementAndGet()
+                root?.recycle()
+            }
         }
+    }
+
+    private fun trackGestureMove(x: Float, y: Float) {
+        if (gestureToken == null || gestureNotTap) return
+        gestureMaxDistance = maxOf(gestureMaxDistance, TapGesture.distance(gestureDownX, gestureDownY, x, y))
+        // Lenient: twice the platform slop, so a slightly shaky tap still counts.
+        val slop = 2f * android.view.ViewConfiguration.get(this).scaledTouchSlop
+        if (!TapGesture.isTap(gestureDownX, gestureDownY, gestureMaxDistance, 0, slop, Long.MAX_VALUE)) {
+            markGestureNotTap("moved ${gestureMaxDistance.toInt()}px")
+        }
+    }
+
+    private fun markGestureNotTap(why: String) {
+        gestureNotTap = true
+        val token = gestureToken ?: return
+        pendingRawCommit?.let { handler.removeCallbacks(it) }
+        pendingRawCommit = null
+        teachRecorder?.discardTouch(token)
+        if (BuildConfig.DEBUG) android.util.Log.d("CaloTouchCapture", "touch $token is not a tap ($why) — not recorded")
+    }
+
+    private fun flushPendingRawCommit() {
+        val pending = pendingRawCommit ?: return
+        handler.removeCallbacks(pending)
+        pending.run()
+    }
+
+    /** Whether ([x], [y]) is inside the on-screen keyboard's window. */
+    private fun isOnKeyboard(x: Int, y: Int): Boolean {
+        val bounds = android.graphics.Rect()
+        return windows.any { w ->
+            w.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD && run {
+                w.getBoundsInScreen(bounds)
+                bounds.contains(x, y)
+            }
+        }
+    }
+
+    private fun offerRawTouch(
+        recorder: TeachRecorder,
+        token: Long,
+        anchor: com.calo.domain.model.ElementAnchor?,
+        actionPackage: String?,
+        downAtMs: Long
+    ) {
+        if (teachRecorder !== recorder) return // teaching stopped meanwhile
+        if (!recorder.offerRawTouch(token, anchor)) return
+        val commit = object : Runnable {
+            override fun run() {
+                if (pendingRawCommit === this) pendingRawCommit = null
+                recorder.commitRawTouchIfStillPending(token, actionPackage)
+                checkpointTeaching()
+            }
+        }
+        pendingRawCommit = commit
+        val now = System.currentTimeMillis()
+        val delay = if (lastTouchUpAtMs >= downAtMs) {
+            (lastTouchUpAtMs + RAW_TOUCH_COMMIT_DELAY_MS - now).coerceAtLeast(0)
+        } else {
+            // Finger still down: re-scheduled to UP + RAW_TOUCH_COMMIT_DELAY_MS when it lifts.
+            (downAtMs + RAW_TOUCH_NO_UP_TIMEOUT_MS - now).coerceAtLeast(0)
+        }
+        handler.postDelayed(commit, delay)
     }
 }

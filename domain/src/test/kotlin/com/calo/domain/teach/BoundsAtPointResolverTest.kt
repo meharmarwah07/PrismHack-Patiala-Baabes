@@ -46,4 +46,35 @@ class BoundsAtPointResolverTest {
         assertEquals(0, BoundsAtPointResolver.firstContaining(listOf(row), x = 99, y = 99))
         assertNull(BoundsAtPointResolver.firstContaining(listOf(row), x = 100, y = 50))
     }
+
+    // Zomato menu, 27 Sep 2026: a big container earlier in the tree (the
+    // search container / section header) also covers the ADD button.
+    private val bigContainer = BoundsAtPointResolver.Candidate(Bounds(0, 0, 1080, 2400), visibleToUser = true)
+    private val hiddenOverlay = BoundsAtPointResolver.Candidate(Bounds(600, 800, 1000, 950), visibleToUser = false)
+    private val menuRow = BoundsAtPointResolver.Candidate(Bounds(0, 400, 1080, 1200), visibleToUser = true)
+    private val addButton = BoundsAtPointResolver.Candidate(Bounds(640, 830, 1000, 950), visibleToUser = true)
+
+    @Test
+    fun `tap on ADD resolves to the ADD button, not the big container that comes first`() {
+        val tree = listOf(bigContainer, menuRow, addButton)
+        assertEquals(2, BoundsAtPointResolver.smallestVisibleContaining(tree, x = 800, y = 890))
+    }
+
+    @Test
+    fun `invisible nodes are ignored even when they're the smallest`() {
+        val tree = listOf(bigContainer, menuRow, hiddenOverlay, addButton)
+        assertEquals(3, BoundsAtPointResolver.smallestVisibleContaining(tree, x = 800, y = 890))
+    }
+
+    @Test
+    fun `equal size overlap goes to the later node, which is drawn on top`() {
+        val a = BoundsAtPointResolver.Candidate(Bounds(0, 0, 100, 100), visibleToUser = true)
+        val b = BoundsAtPointResolver.Candidate(Bounds(0, 0, 100, 100), visibleToUser = true)
+        assertEquals(1, BoundsAtPointResolver.smallestVisibleContaining(listOf(a, b), x = 50, y = 50))
+    }
+
+    @Test
+    fun `nothing visible under the finger resolves to nothing`() {
+        assertNull(BoundsAtPointResolver.smallestVisibleContaining(listOf(hiddenOverlay), x = 800, y = 890))
+    }
 }

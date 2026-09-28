@@ -1,4 +1,4 @@
-﻿package com.calo.domain.nlu
+package com.calo.domain.nlu
 
 /**
  * Builds the single LLM call this app makes for utterance-matching +
@@ -27,7 +27,8 @@ object NluPrompt {
         }
         val candidatesBlock = candidates.joinToString("\n") { c ->
             val slots = if (c.slotNames.isEmpty()) "none" else c.slotNames.joinToString(", ")
-            "- id: \"${c.id}\"\n  taught phrase: \"${c.triggerUtterance}\"\n  description: \"${c.description}\"\n  slots to fill if matched: $slots"
+            val app = c.appName?.let { "\n  learned on app: \"$it\"" }.orEmpty()
+            "- id: \"${c.id}\"\n  taught phrase: \"${c.triggerUtterance}\"\n  description: \"${c.description}\"$app\n  slots to fill if matched: $slots"
         }
         return buildPrompt(utterance, candidatesBlock)
     }
@@ -44,9 +45,10 @@ Rules:
 - Match by MEANING, not exact wording. "order me a pepperoni pizza" should match a flow taught as "order a margherita pizza" if the flow has an "item" slot — the user is asking for the same ACTION with a different value.
 - If a candidate has slots, extract the value for each slot from the spoken command. If a slot's value isn't mentioned, omit it from slotValues — do not guess.
 - If nothing genuinely matches, set matchedFlowId to null and slotValues to an empty object.
+- If the user explicitly names an app to use (e.g. "... on Myntra"), put that app's name in targetApp, even if the matching flow was learned on a different app: the same task can be carried out on another app, so still match the flow by what the task is. If no app is named, targetApp is null.
 - confidence is your own calibrated 0.0-1.0 estimate that this is the right flow.
 
 Respond with ONLY this JSON shape, no other text, no markdown fences:
-{"matchedFlowId": "<id or null>", "slotValues": {"<slotName>": "<value>"}, "confidence": <0.0-1.0>}
+{"matchedFlowId": "<id or null>", "slotValues": {"<slotName>": "<value>"}, "targetApp": "<app name or null>", "confidence": <0.0-1.0>}
 """.trimIndent()
 }

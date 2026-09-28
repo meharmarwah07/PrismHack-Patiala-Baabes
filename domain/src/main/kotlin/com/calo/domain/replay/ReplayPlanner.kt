@@ -12,26 +12,43 @@ import com.calo.domain.slots.SlotResolver
  * [NodeProvider], so this file is what ReplayEngine (in :app) delegates to,
  * and what gets to be unit-tested for real here.
  *
- * The one rule this class exists to enforce: the credential gate is
- * evaluated BEFORE every single step, not once at flow start. A step list
- * can walk into a login/payment screen midway (session timeout, "add a
- * card" mid-checkout) that wasn't there when the flow was taught, and this
- * loop has to catch that on every iteration or the guarantee is worthless.
+ * Rules this class exists to enforce:
  *
- * Second rule, added 2026-09-26 after a real teach-time capture bug (a
- * Zomato flow recorded the same "Domino's Pizza" CLICK anchor 5 times in a
- * row): a CLICK step whose action AND target are IDENTICAL to the
- * immediately preceding step is never re-resolved or re-tapped — it's
- * skipped. The prior assumption ("re-tapping an already-open screen is a
- * no-op") was never actually tested and doesn't hold in general: the same
- * resourceId/text can legitimately resolve to a DIFFERENT real element
- * once the screen has moved on (a generic id/label reused across screens),
- * so blindly re-resolving a duplicate risks acting on that new element as
- * if it were still the taught step, not a no-op. One taught tap is always
- * exactly one FlowStep in this system, so a consecutive duplicate is never
- * a genuine second user action — it's always a capture artifact. Scoped to
- * CLICK only: a repeated SCROLL on the same anchor (e.g. "scroll down
- * twice") is a normal, intentional taught pattern this must not break.
+ * 1. The credential gate is evaluated BEFORE every single step, not once at
+ *    flow start. A step list can walk into a login/payment screen midway
+ *    (session timeout, "add a card" mid-checkout) that wasn't there when
+ *    the flow was taught, and this loop has to catch that on every
+ *    iteration or the guarantee is worthless. Unconditional, even for a
+ *    step about to be skipped as a duplicate below: the "checked before
+ *    EVERY step, no exceptions" guarantee must not grow a silent gap for
+ *    skipped steps.
+ *
+ * 2. Added 2026-09-26 after a real teach-time capture bug (a Zomato flow
+ *    recorded the same "Domino's Pizza" CLICK anchor 5 times in a row): a
+ *    CLICK step whose action AND target are IDENTICAL to the immediately
+ *    preceding step is never re-resolved or re-tapped — it's skipped. The
+ *    prior assumption ("re-tapping an already-open screen is a no-op") was
+ *    never actually tested and doesn't hold in general: the same
+ *    resourceId/text can legitimately resolve to a DIFFERENT real element
+ *    once the screen has moved on (a generic id/label reused across
+ *    screens), so blindly re-resolving a duplicate risks acting on that
+ *    new element as if it were still the taught step, not a no-op. One
+ *    taught tap is always exactly one FlowStep in this system, so a
+ *    consecutive duplicate is never a genuine second user action — it's
+ *    always a capture artifact. Scoped to CLICK only: a repeated SCROLL on
+ *    the same anchor (e.g. "scroll down twice") is a normal, intentional
+ *    taught pattern this must not break.
+ *
+ * Note on scope (2026-09-28): a cross-app "semantic" replay mode was
+ * prototyped on a teammate's branch (RoleMatcher/ScreenElement-based
+ * grounding for running a flow on a DIFFERENT app than it was taught on).
+ * Deliberately left out of this integration: cross-app generalization is
+ * the project's own +4 bonus item, explicitly rejected as an architecture
+ * direction in this project's `theme3-eval-criteria-status.md` (25 Sep) —
+ * it costs T2's determinism guarantee and weakens T11's fail-closed
+ * safety property for the least valuable scored item. The prototype isn't
+ * discarded, just not merged into the tested critical path this close to
+ * freeze; it remains on that branch if revisited later.
  */
 object ReplayPlanner {
 
@@ -44,12 +61,8 @@ object ReplayPlanner {
         var previousStep: FlowStep? = null
 
         for (step in ordered) {
-            // Gate check happens first, before resolving or touching any
-            // node for this step — a Blocked verdict means this step (and
-            // everything after it) is never attempted. Unconditional, even
-            // for a step about to be skipped as a duplicate below: the
-            // "checked before EVERY step, no exceptions" guarantee must not
-            // grow a silent gap for skipped steps.
+            // Rule 1 — see class doc. Unconditional, before anything else
+            // this iteration, including the duplicate check below.
             val verdict = CredentialGateRules.classify(provider.currentScreenSignals())
             if (verdict is GateVerdict.Blocked) {
                 return ReplayResult.Halted(atStepOrder = step.order, reason = verdict.reason)

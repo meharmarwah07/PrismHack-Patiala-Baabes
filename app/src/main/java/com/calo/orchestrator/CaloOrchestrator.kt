@@ -1,4 +1,4 @@
-﻿package com.calo.orchestrator
+package com.calo.orchestrator
 
 import android.content.Context
 import android.content.Intent
@@ -13,6 +13,7 @@ import com.calo.domain.replay.ReplayResult
 import com.calo.domain.replay.StuckAction
 import com.calo.domain.replay.StuckAnswerHandler
 import com.calo.domain.replay.StuckQuestion
+import com.calo.domain.semantic.RoleLabeler
 import com.calo.nlu.NLUClient
 import com.calo.replay.ReplayEngine
 import com.calo.voice.TextToSpeechManager
@@ -23,9 +24,24 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import kotlin.coroutines.resume
 
+/**
+ * Asks the user a yes/no question (e.g. "Did you mean ...?") and reports the
+ * answer. The UI supplies this; callers without one (adb debug paths) get
+ * the conservative behaviour of not proceeding.
+ */
+typealias ConfirmPrompt = (question: String, answer: (Boolean) -> Unit) -> Unit
+
 class CaloOrchestrator(context: Context) {
+
+    private companion object {
+        // Below this, the AI's pick is confirmed with the user before
+        // anything is tapped. The parser reports 0.0 when the reply had no
+        // confidence at all, so a missing value also asks.
+        const val CONFIDENCE_THRESHOLD = 0.6
+    }
 
     private val appContext = context.applicationContext
     private val voice = VoiceInputManager(appContext)
@@ -36,9 +52,9 @@ class CaloOrchestrator(context: Context) {
     private val job = SupervisorJob()
     private val scope = CoroutineScope(Dispatchers.Main + job)
 
-    fun startVoiceCommand(onStatus: (String) -> Unit) {
+    fun startVoiceCommand(onStatus: (String) -> Unit, onConfirm: ConfirmPrompt? = null) {
         voice.startListening(
-            onResult = { utterance -> handleUtterance(utterance, onStatus) },
+            onResult = { utterance -> handleUtterance(utterance, onStatus, onConfirm) },
             onFailure = { reason -> onStatus("Didn't catch that: $reason") }
         )
     }
@@ -60,7 +76,7 @@ class CaloOrchestrator(context: Context) {
      * either. Not yet solved; flagging so it isn't mistaken for "works in
      * all cases."
      */
-    internal fun handleUtterance(utterance: String, onStatus: (String) -> Unit) {
+    internal fun handleUtterance(utterance: String, onStatus: (String) -> Unit, onConfirm: ConfirmPrompt? = null) {
         val service = CaloAccessibilityService.instance
         if (service == null) {
             onStatus("Calo's accessibility service isn't running — enable it in Settings.")
@@ -79,7 +95,8 @@ class CaloOrchestrator(context: Context) {
                     id = flow.id,
                     triggerUtterance = flow.triggerUtterance,
                     description = flow.description,
-                    slotNames = flow.slots.map { it.name }
+                    slotNames = flow.slots.map { it.name },
+                    appName = appLabel(flow.targetPackage)
                 )
             }
 
@@ -105,26 +122,69 @@ class CaloOrchestrator(context: Context) {
             // itself going Stuck/Halted) is otherwise undiagnosable from
             // logs alone, since describeResult() only ever shows the FINAL
             // outcome, never what Groq actually returned.
-            android.util.Log.d("Calo", "NLU match: matchedFlowId=${match.matchedFlowId} confidence=${match.confidence} slotValues=${match.slotValues} candidates=${candidates.map { it.id to it.triggerUtterance }}")
+            android.util.Log.d("Calo", "NLU match: matchedFlowId=${match.matchedFlowId} confidence=${match.confidence} slotValues=${match.slotValues} targetApp=${match.targetApp} candidates=${candidates.map { it.id to it.triggerUtterance }}")
             val matchedFlow = flows.find { it.id == match.matchedFlowId }
             if (matchedFlow == null) {
                 onStatus("Didn't recognize \"$utterance\" as any learned flow.")
                 return@launch
             }
 
-            val targetPackage = matchedFlow.targetPackage
-            if (service.currentPackageName() != targetPackage) {
-                onStatus("Opening $targetPackage...")
-                val arrived = launchAndWaitForForeground(service, targetPackage)
-                if (!arrived) {
-                    onStatus("Couldn't bring $targetPackage to the foreground — is it installed?")
+            // Unsure which flow was meant: ask before touching anything.
+            if (match.confidence < CONFIDENCE_THRESHOLD) {
+                val question = "Did you mean \"${matchedFlow.description}\"?"
+                if (onConfirm == null) {
+                    onStatus("Not sure you meant \"${matchedFlow.description}\" — try saying it more clearly.")
+                    return@launch
+                }
+                val yes = suspendCancellableCoroutine { cont -> onConfirm(question) { cont.resume(it) } }
+                if (!yes) {
+                    onStatus("Okay, not running it.")
                     return@launch
                 }
             }
 
+            // Which app to run on: the one the user named, else the one it
+            // was taught on. A different app means grounding the flow by
+            // what each step means, not by the taught app's buttons.
+            val taughtPackage = matchedFlow.targetPackage
+            val namedApp = match.targetApp
+            val targetPackage = if (namedApp != null) {
+                resolvePackageForAppName(namedApp) ?: run {
+                    onStatus("I couldn't find an app called \"$namedApp\" on this phone.")
+                    return@launch
+                }
+            } else {
+                taughtPackage
+            }
+            // Note (2026-09-28): a "SEMANTIC" cross-app replay mode was
+            // prototyped on a teammate's branch (grounding a flow on a
+            // DIFFERENT app than it was taught on) but deliberately left
+            // out of this integration — see ReplayPlanner's class doc for
+            // why (rejected architecture direction, +4 bonus item, real
+            // safety/determinism cost). If targetPackage differs from
+            // taughtPackage here (the user named a different app by
+            // voice), replay still runs in the only mode that exists —
+            // the taught anchors won't resolve on a different app's
+            // screen, so this correctly surfaces as Stuck rather than
+            // silently misfiring; it just won't succeed. Documented, not
+            // a regression from anything that worked before.
+
+            // Always a FRESH start at the app's home screen: re-opening a
+            // running app otherwise resumes whatever screen it was last on
+            // (confirmed on-device 27 Sep: Zomato came back on a restaurant
+            // menu, so the flow's first step — a card on the home feed —
+            // wasn't there).
+            onStatus("Opening ${appLabel(targetPackage)}...")
+            val arrived = launchAndWaitForForeground(service, targetPackage)
+            if (!arrived) {
+                onStatus("Couldn't bring $targetPackage to the foreground — is it installed?")
+                return@launch
+            }
+
             onStatus("Replaying: ${matchedFlow.description}")
             val engine = ReplayEngine(service)
-            val result = engine.replay(matchedFlow.steps, match.slotValues)
+            // Off the main thread: replay sleeps while screens settle.
+            val result = withContext(Dispatchers.Default) { engine.replay(matchedFlow.steps, match.slotValues) }
             handleReplayResult(engine, matchedFlow.steps, match.slotValues, result, onStatus)
         }
     }
@@ -208,7 +268,10 @@ class CaloOrchestrator(context: Context) {
     ): Boolean {
         val launchIntent = appContext.packageManager.getLaunchIntentForPackage(targetPackage)
             ?: return false
-        launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        // CLEAR_TASK drops the app's existing back stack so it opens at its
+        // home screen, like the start of a teaching session, instead of
+        // wherever the user last left it.
+        launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
         appContext.startActivity(launchIntent)
 
         val deadline = System.currentTimeMillis() + timeoutMs
@@ -217,6 +280,44 @@ class CaloOrchestrator(context: Context) {
             delay(pollIntervalMs)
         }
         return service.currentPackageName() == targetPackage
+    }
+
+    /**
+     * Finds an installed, launchable app by the name the user said
+     * ("Myntra" -> com.myntra.android): exact label match first, then a
+     * label containing the name or vice versa. Relies on the manifest's
+     * <queries> launcher entry for package visibility on Android 11+.
+     */
+    private fun resolvePackageForAppName(name: String): String? {
+        val wanted = normalizeAppName(name)
+        if (wanted.isEmpty()) return null
+        val pm = appContext.packageManager
+        val launcher = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        val apps = pm.queryIntentActivities(launcher, 0)
+            .map { it.activityInfo.packageName to normalizeAppName(it.loadLabel(pm).toString()) }
+            .filter { it.first != appContext.packageName }
+        return apps.firstOrNull { it.second == wanted }?.first
+            ?: apps.firstOrNull { it.second.length >= 3 && (it.second.contains(wanted) || wanted.contains(it.second)) }?.first
+    }
+
+    private fun normalizeAppName(s: String) = s.lowercase().filter { it.isLetterOrDigit() }
+
+    private fun appLabel(packageName: String): String = try {
+        val pm = appContext.packageManager
+        pm.getApplicationInfo(packageName, 0).loadLabel(pm).toString()
+    } catch (e: Exception) {
+        packageName
+    }
+
+    /**
+     * By the time replay ends the target app is in front, hiding Calo's own
+     * status line — so the outcome (especially "Got stuck at step N") is
+     * also shown as a toast over whatever app is open.
+     */
+    private fun announceResult(message: String, onStatus: (String) -> Unit) {
+        onStatus(message)
+        android.util.Log.i("Calo", "Replay result: $message")
+        android.widget.Toast.makeText(appContext, "Calo: $message", android.widget.Toast.LENGTH_LONG).show()
     }
 
     private fun describeResult(result: ReplayResult): String = when (result) {
@@ -274,7 +375,7 @@ class CaloOrchestrator(context: Context) {
                     targetPackage = targetPackage,
                     triggerUtterance = triggerUtterance,
                     description = description,
-                    steps = steps,
+                    steps = RoleLabeler.label(steps),
                     slots = emptyList()
                 )
             )
@@ -309,7 +410,9 @@ class CaloOrchestrator(context: Context) {
                     targetPackage = targetPackage,
                     triggerUtterance = triggerUtterance,
                     description = description,
-                    steps = steps,
+                    // What each step means, so this flow can later be
+                    // carried to another app. Doesn't change same-app replay.
+                    steps = RoleLabeler.label(steps),
                     slots = slots
                 )
             )
@@ -346,8 +449,8 @@ class CaloOrchestrator(context: Context) {
             }
             onStatus("Replaying (debug, no NLU): ${latest.description}")
             val engine = ReplayEngine(service)
-            val result = engine.replay(latest.steps, emptyMap())
-            onStatus(describeResult(result))
+            val result = withContext(Dispatchers.Default) { engine.replay(RoleLabeler.relabel(latest.steps), emptyMap()) }
+            announceResult(describeResult(result), onStatus)
         }
     }
 
@@ -370,7 +473,7 @@ class CaloOrchestrator(context: Context) {
                     appendLine("id=${flow.id} targetPackage=${flow.targetPackage} trigger=\"${flow.triggerUtterance}\" description=\"${flow.description}\" createdAt=${flow.createdAt}")
                     flow.steps.forEach { step ->
                         appendLine(
-                            "  step order=${step.order} action=${step.action} slotName=${step.slotName} recordedValue=${step.recordedValue} " +
+                            "  step order=${step.order} action=${step.action} role=${step.role} slotName=${step.slotName} recordedValue=${step.recordedValue} " +
                                 "anchor(resourceId=${step.target.resourceId}, text=${step.target.text}, contentDescription=${step.target.contentDescription}, " +
                                 "className=${step.target.className}, indexInParent=${step.target.indexInParent})"
                         )

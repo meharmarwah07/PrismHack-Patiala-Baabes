@@ -22,6 +22,19 @@ package com.calo.domain.teach
  * booleans this pure function needs.
  */
 object RawTouchCaptureGate {
-    fun isCaptureAllowed(credentialGateClear: Boolean, keyboardVisible: Boolean): Boolean =
-        credentialGateClear && !keyboardVisible
+    /**
+     * [touchOnKeyboard]: the touch landed inside the on-screen keyboard's
+     * window. Those coordinates are key presses — recording them would
+     * amount to logging what the user types — so they're always refused.
+     *
+     * Changed 27 Sep 2026 from "refuse every touch while the keyboard is
+     * visible": that also dropped the tap on a search suggestion/result
+     * made with the keyboard still up (confirmed on-device, Zomato: the
+     * Burger King result tap was never recorded), and the reason it was
+     * added — real key taps being dropped while touch capture was on — is
+     * believed to have been the since-fixed delegation delay (touches were
+     * held back while the whole screen was read on the main thread).
+     */
+    fun isCaptureAllowed(credentialGateClear: Boolean, touchOnKeyboard: Boolean): Boolean =
+        credentialGateClear && !touchOnKeyboard
 }

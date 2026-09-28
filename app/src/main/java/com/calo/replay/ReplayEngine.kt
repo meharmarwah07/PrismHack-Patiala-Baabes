@@ -25,6 +25,13 @@ private class AndroidNodeHandle(val node: AccessibilityNodeInfo) : NodeHandle
  * "if step N then..." branching, that logic belongs in ReplayPlanner, not
  * here — keeping that split is what makes the sequencing testable at all.
  *
+ * Scope note (2026-09-28): does NOT implement the semantic-layer members
+ * of NodeProvider (screenElements/nodeForElement/submitCurrentInput) —
+ * those have safe empty/false/no-op defaults on the interface, which is
+ * exactly correct here: cross-app "semantic" replay was left out of this
+ * integration (see ReplayPlanner's class doc for why), so this provider
+ * only ever needs to support ReplayPlanner's EXACT-mode path.
+ *
  * UNVERIFIED beyond compilation: there is no Android SDK, emulator, or
  * device in the environment this was built in, so nothing below has run
  * against a real AccessibilityNodeInfo. Two things specifically need a
@@ -58,7 +65,23 @@ class ReplayEngine(
 
     private companion object {
         const val TAG = "Calo"
+
+        // Screen-settle wait after every action (replaces the old fixed
+        // 400ms sleep). A tap's effect isn't always visible instantly, so
+        // always give it MIN_SETTLE_MS, then poll until two reads in a row
+        // show the same screen, giving up after MAX_SETTLE_MS.
+        const val MIN_SETTLE_MS = 300L
+        const val SETTLE_POLL_MS = 250L
+        const val MAX_SETTLE_MS = 4000L
+
+        // After an action, how long to wait for the screen to start
+        // changing before assuming the action doesn't navigate anywhere.
+        const val MAX_CHANGE_WAIT_MS = 2000L
     }
+
+    // Screen fingerprint just before the latest action, so the wait after
+    // it can tell "already settled" from "hasn't started changing yet".
+    private var fingerprintBeforeAction: Int? = null
 
     // Counts actions actually PERFORMED (performClick/performSetText/
     // performScroll calls), not FlowStep.order — a step that goes Stuck
@@ -89,7 +112,11 @@ class ReplayEngine(
         cachedRoot?.recycle()
         cachedRoot = null
         service.setReplaying(true)
+        Log.i(TAG, "Replay starting: steps=${steps.size}")
         return try {
+            // The app may have just been launched (splash screen, feed still
+            // loading): let it settle before looking for step 1.
+            waitForStableScreen()
             ReplayPlanner.replay(steps, slotValues, this)
         } finally {
             service.setReplaying(false)
@@ -129,12 +156,24 @@ class ReplayEngine(
         return AndroidNodeHandle(node)
     }
 
+    override fun awaitScreenChange() = waitForStableScreen()
+
     override fun performClick(node: NodeHandle): Boolean {
         val info = (node as AndroidNodeHandle).node
         stepCounter++
+        fingerprintBeforeAction = screenFingerprint()
         Log.i(TAG, "Replay step $stepCounter: CLICK target=${describe(info)}")
-        val ok = info.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        var ok = info.performAction(AccessibilityNodeInfo.ACTION_CLICK)
         Log.i(TAG, "Replay step $stepCounter: CLICK result=$ok")
+        if (!ok) {
+            // Some elements only react to a real touch. Tap its centre.
+            val bounds = android.graphics.Rect()
+            info.getBoundsInScreen(bounds)
+            if (!bounds.isEmpty && info.isVisibleToUser) {
+                ok = service.tapAt(bounds.exactCenterX(), bounds.exactCenterY())
+                Log.i(TAG, "Replay step $stepCounter: finger-tap fallback at (${bounds.centerX()},${bounds.centerY()}) result=$ok")
+            }
+        }
         info.recycle()
         return ok
     }
@@ -142,6 +181,7 @@ class ReplayEngine(
     override fun performSetText(node: NodeHandle, value: String): Boolean {
         val info = (node as AndroidNodeHandle).node
         stepCounter++
+        fingerprintBeforeAction = screenFingerprint()
         Log.i(TAG, "Replay step $stepCounter: SET_TEXT target=${describe(info)} value=\"$value\"")
         val args = Bundle().apply {
             putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, value)
@@ -155,6 +195,7 @@ class ReplayEngine(
     override fun performScroll(node: NodeHandle, forward: Boolean): Boolean {
         val info = (node as AndroidNodeHandle).node
         stepCounter++
+        fingerprintBeforeAction = screenFingerprint()
         Log.i(TAG, "Replay step $stepCounter: SCROLL(forward=$forward) target=${describe(info)}")
         val action = if (forward) {
             AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
@@ -167,16 +208,39 @@ class ReplayEngine(
         return ok
     }
 
-    override fun awaitIdle() {
-        // Simplification for this build pass: a fixed settle delay rather
-        // than a real window-content-changed listener. Not verified
-        // against a real device — if a screen transition is slower than
-        // this, the next step's findNode() will fail to resolve and the
-        // planner reports Stuck; it will not silently act on a stale
-        // screen, but the flow will incorrectly stop on a slow-loading
-        // screen that would otherwise have succeeded. Tune this constant,
-        // or replace with a real idle-detection listener, once tested on
-        // an actual device against real app transition times.
-        Thread.sleep(400)
+    override fun awaitIdle() = waitForStableScreen()
+
+    /**
+     * Confirmed on-device (Zomato, 27 Sep 2026): the next step started
+     * 0.6s after a tap that opened a new page, because the OLD page was
+     * still perfectly still for two polls before navigation began. So
+     * first wait (up to MAX_CHANGE_WAIT_MS) for the screen to differ from
+     * how it looked right before the action; then wait for it to settle.
+     */
+    private fun waitForStableScreen() {
+        val before = fingerprintBeforeAction
+        fingerprintBeforeAction = null
+        if (before != null) {
+            val changeDeadline = System.currentTimeMillis() + MAX_CHANGE_WAIT_MS
+            while (System.currentTimeMillis() < changeDeadline && screenFingerprint() == before) {
+                Thread.sleep(SETTLE_POLL_MS / 2)
+            }
+        }
+        Thread.sleep(MIN_SETTLE_MS)
+        val deadline = System.currentTimeMillis() + MAX_SETTLE_MS
+        var previous = screenFingerprint()
+        while (System.currentTimeMillis() < deadline) {
+            Thread.sleep(SETTLE_POLL_MS)
+            val current = screenFingerprint()
+            if (current == previous) return
+            previous = current
+        }
+        Log.w(TAG, "Screen still changing after ${MAX_SETTLE_MS}ms — continuing anyway")
+    }
+
+    /** Which app, and all visible text: identical twice in a row = settled. */
+    private fun screenFingerprint(): Int {
+        val root = service.currentRoot()
+        return (root?.packageName?.toString() to nodeWalker.collectAllText(root)).hashCode()
     }
 }
