@@ -89,9 +89,23 @@ object ReplayPlanner {
         Thread(runnable, "ReplayStepTimeout").apply { isDaemon = true }
     }
 
-    private class StepTimeoutException(val stepOrder: Int, message: String) : RuntimeException(message)
+    private class StepTimeoutException(
+        val stepOrder: Int,
+        val isAction: Boolean,
+        message: String
+    ) : RuntimeException(message)
 
-    private fun <T> withStepTimeout(stepOrder: Int, opName: String, block: () -> T): T {
+    // [isAction] marks a call that DOES something on the real device
+    // (performClick/performSetText/performScroll) as opposed to one that
+    // only reads state (currentScreenSignals/findNode/findNodeByValue/
+    // awaitIdle). A timed-out read is simply abandoned — nothing happened.
+    // A timed-out action is different: future.cancel(true) below is
+    // best-effort against a blocked Binder call (may not actually stop it),
+    // so the real tap/type/scroll can still land on the device later,
+    // unsupervised, after this function has already told the caller Stuck.
+    // See ReplayResult.Stuck.actionMayHaveExecuted's doc for how callers
+    // must treat that.
+    private fun <T> withStepTimeout(stepOrder: Int, opName: String, isAction: Boolean = false, block: () -> T): T {
         val future = timeoutExecutor.submit(Callable(block))
         return try {
             future.get(STEP_TIMEOUT_MS, TimeUnit.MILLISECONDS)
@@ -99,6 +113,7 @@ object ReplayPlanner {
             future.cancel(true) // best-effort; may not actually unblock a stuck Binder call
             throw StepTimeoutException(
                 stepOrder,
+                isAction,
                 "step $stepOrder timed out after ${STEP_TIMEOUT_MS}ms waiting for $opName — target screen may be gone"
             )
         } catch (e: ExecutionException) {
@@ -154,19 +169,19 @@ object ReplayPlanner {
                             withStepTimeout(step.order, "findNode") { provider.findNode(step.target) }
                                 ?: return ReplayResult.Stuck(step.order, "element not found: ${step.target}")
                         }
-                        withStepTimeout(step.order, "performClick") { provider.performClick(node) }
+                        withStepTimeout(step.order, "performClick", isAction = true) { provider.performClick(node) }
                     }
                     ActionType.SET_TEXT -> {
                         val node = withStepTimeout(step.order, "findNode") { provider.findNode(step.target) }
                             ?: return ReplayResult.Stuck(step.order, "element not found: ${step.target}")
                         val value = SlotResolver.resolveValue(step, slotValues)
                             ?: return ReplayResult.Stuck(step.order, "no value to type (should be unreachable for SET_TEXT)")
-                        withStepTimeout(step.order, "performSetText") { provider.performSetText(node, value) }
+                        withStepTimeout(step.order, "performSetText", isAction = true) { provider.performSetText(node, value) }
                     }
                     ActionType.SCROLL -> {
                         val node = withStepTimeout(step.order, "findNode") { provider.findNode(step.target) }
                             ?: return ReplayResult.Stuck(step.order, "element not found: ${step.target}")
-                        withStepTimeout(step.order, "performScroll") { provider.performScroll(node, forward = true) }
+                        withStepTimeout(step.order, "performScroll", isAction = true) { provider.performScroll(node, forward = true) }
                     }
                 }
 
@@ -183,7 +198,7 @@ object ReplayPlanner {
 
             return ReplayResult.Completed
         } catch (e: StepTimeoutException) {
-            return ReplayResult.Stuck(e.stepOrder, e.message ?: "step timed out")
+            return ReplayResult.Stuck(e.stepOrder, e.message ?: "step timed out", actionMayHaveExecuted = e.isAction)
         }
     }
 

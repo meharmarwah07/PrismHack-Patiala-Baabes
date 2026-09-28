@@ -201,6 +201,16 @@ class CaloOrchestrator(context: Context) {
      * function is just the Android-side glue (TTS + SpeechRecognizer)
      * around it. Completed/Halted results are unaffected — Halted (the
      * credential gate) is a final safety stop, never a question.
+     *
+     * Exception (2026-09-28): a Stuck whose [ReplayResult.Stuck.
+     * actionMayHaveExecuted] is true came from a timed-out tap/type/scroll
+     * that may still land on the device later, unsupervised — see that
+     * field's doc. Retrying here would risk a second, uncontrolled action
+     * stacking on top of one that might already be in flight, and "should I
+     * pick something else, or stop?" is actively misleading when the honest
+     * answer is "I don't know what just happened." This case skips the
+     * question entirely and goes straight to a stop, with the uncertainty
+     * said out loud rather than papered over.
      */
     private suspend fun handleReplayResult(
         engine: ReplayEngine,
@@ -212,6 +222,13 @@ class CaloOrchestrator(context: Context) {
     ) {
         if (result !is ReplayResult.Stuck) {
             onStatus(describeResult(result))
+            return
+        }
+
+        if (result.actionMayHaveExecuted) {
+            val message = "Stopped — the last action may not have completed cleanly, so I'm not retrying automatically."
+            onStatus(message)
+            tts.speak(message)
             return
         }
 
