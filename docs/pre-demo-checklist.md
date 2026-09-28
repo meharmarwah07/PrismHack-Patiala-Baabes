@@ -9,8 +9,33 @@ Every taught flow from every rehearsal is sitting in the Room DB. If you skip
 this, the NLU match step sees stale/duplicate candidates (multiple "order a
 Margherita" flows from different takes) and confidence gets noisy.
 
-**Preferred: debug-build reset broadcast** (clears rows, keeps the app
-installed, accessibility grant, and mic permission intact):
+**On judging day (release build): `adb shell pm clear com.calo`** — the app
+will be submitted and judged as a release APK, and `DEBUG_RESET` (below) is
+compiled out of release builds entirely, so it will silently no-op if you
+reach for it there. `pm clear` is the method that actually works against
+what gets judged:
+
+```sh
+adb -s acd41a26 shell pm clear com.calo
+```
+
+This wipes the Room DB, but it also wipes *everything else app-scoped*:
+
+- The accessibility-service grant (Settings → Accessibility → Calo flips back
+  to off — replay and teach both silently do nothing until it's re-enabled).
+- The RECORD_AUDIO runtime permission (next mic use re-prompts).
+- Any other granted runtime permissions.
+- BuildConfig.GROQ_API_KEY is unaffected (baked in at build time, not app
+  data), but if you also reinstall the APK you obviously start fresh there
+  too.
+
+Immediately after running `pm clear`, do steps 2 and 3 below (re-enable the
+accessibility service, re-grant the mic permission) — on judging day these
+are not optional contingencies, they're required every single time you wipe.
+
+**Dev-testing only (debug build): `DEBUG_RESET` broadcast** — clears rows
+without touching the accessibility grant or mic permission, so it's faster
+to iterate with tonight/tomorrow while rehearsing. Not usable on judging day.
 
 ```sh
 adb -s acd41a26 shell am broadcast -a com.calo.DEBUG_RESET -p com.calo
@@ -24,29 +49,8 @@ adb -s acd41a26 logcat -s CaloDebugReset
 
 You should see a line like `learned_flows reset: 4 row(s) -> 0 row(s)`. This
 receiver (`DebugResetReceiver`) only exists in debug builds — see
-[architecture.md](architecture.md) — so this command is a no-op (broadcast
-goes nowhere) against a release build.
-
-**Brute-force alternative: `adb shell pm clear com.calo`**
-
-```sh
-adb -s acd41a26 shell pm clear com.calo
-```
-
-This also wipes the Room DB, but it wipes *everything else app-scoped too*:
-
-- The accessibility-service grant (Settings → Accessibility → Calo flips back
-  to off — replay and teach both silently do nothing until it's re-enabled).
-- The RECORD_AUDIO runtime permission (next mic use re-prompts).
-- Any other granted runtime permissions.
-- BuildConfig.GROQ_API_KEY is unaffected (baked in at build time, not app
-  data), but if you also reinstall the APK you obviously start fresh there
-  too.
-
-Use `pm clear` only if the debug broadcast path is unavailable (e.g. testing
-a release build) or something is in a state the broadcast can't reach.
-Otherwise prefer the broadcast — it doesn't force you to redo the
-accessibility/mic grant dance before every run.
+[architecture.md](architecture.md) — so this command is a silent no-op
+against the release build you'll actually be judged on.
 
 ## 2. Re-enable the accessibility service
 
@@ -122,9 +126,19 @@ flow is taught, including on judging day:
   fail at replay (timing, stale node references) — catch that per-flow, not
   in a stacked final test pass.
 
+## 9. Release-build smoke test (before freeze — one-time, not day-of)
+
+Build the actual release APK (`./gradlew assembleRelease`), install it fresh
+on the demo device, and confirm Groq/NLU calls still work end-to-end. Nothing
+so far has verified the release build works — release and debug builds can
+differ in how config like `GROQ_API_KEY` gets injected, and this hasn't been
+checked. Do this with enough runway before 29 Sep to fix it if it doesn't.
+
 ## Order matters
 
-Do step 1 (wipe) **before** steps 2–7, since `pm clear` (if you end up needing
-it) undoes the accessibility/mic grants from step 2/3 and would make you redo
-them. The debug broadcast path doesn't have this problem — it's safe to run
-at any point in this list.
+Do step 1 (wipe) **before** steps 2–7. On judging day, wiping via `pm clear`
+undoes the accessibility/mic grants from steps 2/3, so those two steps are
+mandatory after every wipe, not optional — budget time for them. (The
+debug-only `DEBUG_RESET` broadcast doesn't have this problem, but it isn't
+available on the release build you'll actually be judged on.) Step 9 is a
+one-time pre-freeze task, not part of the day-of sequence.
