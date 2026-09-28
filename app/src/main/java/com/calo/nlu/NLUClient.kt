@@ -12,6 +12,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.addJsonObject
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -53,6 +54,17 @@ class NLUClient(
         const val ERROR_MESSAGE = "Voice matching is unavailable right now"
         const val DEFAULT_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
         private val JSON_MEDIA_TYPE = "application/json".toMediaType()
+
+        // openai/gpt-oss-20b is a reasoning model: it emits a "reasoning" stream
+        // BEFORE the final "content" JSON, both drawn from the same completion
+        // budget. Confirmed live (2026-09-28): with no cap set, a single-candidate
+        // "order pizza" call used 64-93 reasoning tokens with finish_reason "stop";
+        // forcing max_completion_tokens down to 15 reproduced content="" with
+        // finish_reason "length" -- reasoning alone exceeded the budget before any
+        // JSON was emitted. Uncapped, Groq's account/model default applies, which
+        // isn't guaranteed generous enough as candidate lists grow. 1024 gives wide
+        // headroom over the ~150-token completions actually observed.
+        private const val MAX_COMPLETION_TOKENS = 1024
     }
 
     private val json = Json { ignoreUnknownKeys = true }
@@ -64,12 +76,19 @@ class NLUClient(
 
     /**
      * ERROR status (never a bare "no match") on a missing key, a failed
-     * HTTP call (401/429/5xx), or a network/timeout exception — T0's
-     * requirement that these look distinctly different from "the model
-     * looked and found nothing," both in the result shape and in
-     * whatever the orchestrator tells the user, and that replay never
-     * starts on any of them. A 200 response with unparseable content
-     * still collapses to NluResponseParser's safe no-match default
+     * HTTP call (401/429/5xx), a network/timeout exception, or a
+     * truncated completion (finish_reason "length" -- see MAX_COMPLETION_TOKENS'
+     * doc: reproduced live on 2026-09-28, this is what "zero confidence,
+     * no match, no exception" turned out to be. gpt-oss-20b's reasoning
+     * can exhaust the completion budget before it emits any JSON, leaving
+     * content="". NluResponseParser correctly treats unparseable content
+     * as a safe no-match by design -- but with no way to tell "the model
+     * looked and said no" apart from "the model never got to answer",
+     * that safe default was silently masking a truncation, not a
+     * judgment. Checking finish_reason here, before content ever reaches
+     * the parser, is what makes that distinction instead of losing it.
+     * A 200 response with unparseable-but-complete content (finish_reason
+     * "stop") still collapses to NluResponseParser's safe no-match default
      * (that's "couldn't understand," a model-quality issue, not a
      * transport error) — see NluResponseParser's class doc. Threshold/
      * ambiguity gating (T12/T13) is applied via NluMatchEvaluator only
@@ -91,14 +110,14 @@ class NLUClient(
                 .post(requestBody.toString().toRequestBody(JSON_MEDIA_TYPE))
                 .build()
 
-            val rawContent = try {
+            val message = try {
                 client.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) {
                         return@withContext errorResult("HTTP ${response.code}")
                     }
                     val bodyString = response.body?.string()
                         ?: return@withContext errorResult("HTTP ${response.code} had no body")
-                    extractMessageContent(bodyString)
+                    extractMessage(bodyString)
                 }
             } catch (e: IOException) {
                 // Covers java.net.SocketTimeoutException (connect/read timeout) as well as
@@ -106,8 +125,20 @@ class NLUClient(
                 return@withContext errorResult("network/timeout: ${e.javaClass.simpleName}", e)
             }
 
-            if (rawContent == null) {
+            if (message == null) {
                 return@withContext errorResult("Groq response body wasn't the expected shape")
+            }
+
+            if (message.finishReason == "length") {
+                return@withContext errorResult(
+                    "Groq truncated before emitting a full answer (finish_reason=length) -- " +
+                        "content was ${if (message.content.isNullOrEmpty()) "empty" else "partial: ${message.content}"}"
+                )
+            }
+
+            val rawContent = message.content
+            if (rawContent == null) {
+                return@withContext errorResult("Groq response had no message.content")
             }
 
             NluMatchEvaluator.evaluate(NluResponseParser.parse(rawContent))
@@ -116,6 +147,7 @@ class NLUClient(
     private fun buildRequestBody(prompt: String) = buildJsonObject {
         put("model", model)
         put("temperature", 0.0) // deterministic matching, not creative
+        put("max_completion_tokens", MAX_COMPLETION_TOKENS)
         putJsonArray("messages") {
             addJsonObject {
                 put("role", "user")
@@ -124,13 +156,14 @@ class NLUClient(
         }
     }
 
-    private fun extractMessageContent(responseBody: String): String? = try {
+    private class GroqMessage(val content: String?, val finishReason: String?)
+
+    private fun extractMessage(responseBody: String): GroqMessage? = try {
         val root = json.parseToJsonElement(responseBody).jsonObject
-        root["choices"]?.jsonArray
-            ?.firstOrNull()
-            ?.jsonObject?.get("message")
-            ?.jsonObject?.get("content")
-            ?.jsonPrimitive?.content
+        val choice = root["choices"]?.jsonArray?.firstOrNull()?.jsonObject ?: return null
+        val content = choice["message"]?.jsonObject?.get("content")?.jsonPrimitive?.content
+        val finishReason = choice["finish_reason"]?.jsonPrimitive?.contentOrNull
+        GroqMessage(content, finishReason)
     } catch (e: Exception) {
         android.util.Log.e("NLUClient", "Could not parse Groq response shape", e)
         null

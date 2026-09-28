@@ -100,4 +100,38 @@ class NLUClientTest {
         assertEquals(MatchStatus.ERROR, result.status)
         assertEquals(0, server.requestCount)
     }
+
+    // Root cause of the 2026-09-28 "zero confidence / no match, no exception" report:
+    // reproduced live that openai/gpt-oss-20b can exhaust its completion budget on
+    // reasoning before emitting any content, returning content="" with
+    // finish_reason="length". Before the fix, that empty content sailed straight into
+    // NluResponseParser, which safely (by design) turns unparseable content into a
+    // bare no-match -- indistinguishable from the model genuinely saying no. This
+    // must come back as ERROR instead, caught before the parser ever sees it.
+    @Test
+    fun `a truncated completion (finish_reason length, empty content) becomes ERROR, not a silent no-match`() = runTest {
+        val body = """{"choices":[{"message":{"content":"","reasoning":"We need to match..."},"finish_reason":"length"}]}"""
+        server.enqueue(MockResponse().setResponseCode(200).setBody(body))
+        val result = clientFor().match("order pizza", candidates)
+        assertEquals(MatchStatus.ERROR, result.status)
+        assertNull(result.matchedFlowId)
+    }
+
+    @Test
+    fun `a completion that finished normally (finish_reason stop) is unaffected by the truncation check`() = runTest {
+        val body = """{"choices":[{"message":{"content":"{\"matchedFlowId\": \"flow-1\", \"slotValues\": {}, \"confidence\": 0.95, \"alternatives\": []}"},"finish_reason":"stop"}]}"""
+        server.enqueue(MockResponse().setResponseCode(200).setBody(body))
+        val result = clientFor().match("order a margherita pizza", candidates)
+        assertEquals(MatchStatus.MATCHED, result.status)
+        assertEquals("flow-1", result.matchedFlowId)
+    }
+
+    @Test
+    fun `the request sent to Groq caps max_completion_tokens so reasoning can't silently starve the answer`() = runTest {
+        val body = """{"choices":[{"message":{"content":"{\"matchedFlowId\": \"flow-1\", \"slotValues\": {}, \"confidence\": 0.95, \"alternatives\": []}"},"finish_reason":"stop"}]}"""
+        server.enqueue(MockResponse().setResponseCode(200).setBody(body))
+        clientFor().match("order a margherita pizza", candidates)
+        val sentBody = server.takeRequest().body.readUtf8()
+        org.junit.Assert.assertTrue(sentBody.contains("\"max_completion_tokens\""))
+    }
 }

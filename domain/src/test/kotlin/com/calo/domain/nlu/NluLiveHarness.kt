@@ -149,6 +149,136 @@ class NluLiveHarness {
         println("NluLiveHarness wrote ${rows.size - 1} rows to ${outFile.absolutePath}")
     }
 
+    // Hypothesis test: gpt-oss-20b is a reasoning model whose "reasoning" tokens come
+    // before the final "content" JSON. If completion is capped low enough that
+    // reasoning eats the whole budget, content truncates to "" with finish_reason
+    // "length" -- and NluResponseParser's safe-default (by design, for genuinely
+    // malformed replies) would silently turn that into confidence=0/no-match with
+    // zero log trace, since it has no android.util.Log and swallows via runCatching.
+    // Forcing a tiny max_completion_tokens here to see exactly what that looks like.
+    @Test
+    fun `repro -- forced truncation via tiny max_completion_tokens`() {
+        if (apiKey.isNullOrBlank()) {
+            println("NluLiveHarness SKIPPED — set GROQ_API_KEY to run live Groq calls")
+            return
+        }
+        val candidate = CandidateFlow(
+            id = java.util.UUID.randomUUID().toString(),
+            triggerUtterance = "Order Pizza",
+            description = "Order Pizza",
+            slotNames = emptyList()
+        )
+        val prompt = NluPrompt.build("order pizza", listOf(candidate))
+        val body = buildJsonObject {
+            put("model", "openai/gpt-oss-20b")
+            put("temperature", 0.0)
+            put("max_completion_tokens", 15) // deliberately tiny -- reasoning alone exceeds this
+            putJsonArray("messages") {
+                add(buildJsonObject {
+                    put("role", "user")
+                    put("content", prompt)
+                })
+            }
+        }.toString()
+        val request = HttpRequest.newBuilder()
+            .uri(URI.create("https://api.groq.com/openai/v1/chat/completions"))
+            .header("Authorization", "Bearer $apiKey")
+            .header("Content-Type", "application/json")
+            .timeout(Duration.ofSeconds(20))
+            .POST(HttpRequest.BodyPublishers.ofString(body))
+            .build()
+        val response = client.send(request, HttpResponse.BodyHandlers.ofString())
+        val rawContent = extractContent(response.body())
+        val parsed = NluResponseParser.parse(rawContent ?: "")
+        val evaluated = NluMatchEvaluator.evaluate(parsed)
+
+        val out = File("build/nlu-repro-truncation.txt")
+        out.parentFile.mkdirs()
+        out.writeText(
+            buildString {
+                appendLine("HTTP STATUS: ${response.statusCode()}")
+                appendLine("FULL RESPONSE BODY:")
+                appendLine(response.body())
+                appendLine()
+                appendLine("EXTRACTED message.content (rawContent): [${rawContent}]")
+                appendLine("PARSED (pre-evaluator): matchedFlowId=${parsed.matchedFlowId} confidence=${parsed.confidence}")
+                appendLine("EVALUATED: matchedFlowId=${evaluated.matchedFlowId} confidence=${evaluated.confidence} status=${evaluated.status}")
+            }
+        )
+        println("Truncation repro written to ${out.absolutePath}")
+    }
+
+    // Temporary repro for the "order pizza" / "Order Pizza" zero-confidence report --
+    // dumps the RAW Groq response text (not just parsed fields) to distinguish a
+    // parser bug from a genuine model no-match.
+    @Test
+    fun `repro -- single candidate 'Order Pizza' trigger vs 'order pizza' utterance`() {
+        if (apiKey.isNullOrBlank()) {
+            println("NluLiveHarness SKIPPED — set GROQ_API_KEY to run live Groq calls")
+            return
+        }
+        val candidate = CandidateFlow(
+            // Production ids are UUID.randomUUID().toString() (see LearnedFlow.kt),
+            // not a readable slug -- testing with a realistic id in case that's the
+            // actual difference from the reported failure.
+            id = java.util.UUID.randomUUID().toString(),
+            triggerUtterance = "Order Pizza",
+            description = "Order Pizza",
+            slotNames = emptyList()
+        )
+        val prompt = NluPrompt.build("order pizza", listOf(candidate))
+        val out = File("build/nlu-repro-order-pizza.txt")
+        out.parentFile.mkdirs()
+        val allRuns = StringBuilder()
+        allRuns.appendLine("PROMPT SENT (same every run):")
+        allRuns.appendLine(prompt)
+        allRuns.appendLine()
+
+        repeat(5) { attempt ->
+            val body = buildJsonObject {
+                put("model", "openai/gpt-oss-20b")
+                put("temperature", 0.0)
+                putJsonArray("messages") {
+                    add(buildJsonObject {
+                        put("role", "user")
+                        put("content", prompt)
+                    })
+                }
+            }.toString()
+            val request = HttpRequest.newBuilder()
+                .uri(URI.create("https://api.groq.com/openai/v1/chat/completions"))
+                .header("Authorization", "Bearer $apiKey")
+                .header("Content-Type", "application/json")
+                .timeout(Duration.ofSeconds(20))
+                .POST(HttpRequest.BodyPublishers.ofString(body))
+                .build()
+            var response = client.send(request, HttpResponse.BodyHandlers.ofString())
+            var retries = 0
+            while (response.statusCode() == 429 && retries < 5) {
+                val retryAfterSec = response.headers().firstValue("retry-after").map { it.toLongOrNull() ?: 5L }.orElse(5L)
+                Thread.sleep((retryAfterSec + 1) * 1000)
+                response = client.send(request, HttpResponse.BodyHandlers.ofString())
+                retries++
+            }
+            val rawContent = extractContent(response.body())
+            val parsed = NluResponseParser.parse(rawContent ?: "")
+            val evaluated = NluMatchEvaluator.evaluate(parsed)
+
+            allRuns.appendLine("=== ATTEMPT ${attempt + 1} (candidate id = ${candidate.id}) ===")
+            allRuns.appendLine("HTTP STATUS: ${response.statusCode()}")
+            allRuns.appendLine("FULL RESPONSE BODY:")
+            allRuns.appendLine(response.body())
+            allRuns.appendLine("EXTRACTED message.content (rawContent):")
+            allRuns.appendLine(rawContent ?: "<null - extractContent failed>")
+            allRuns.appendLine("PARSED (pre-evaluator): matchedFlowId=${parsed.matchedFlowId} confidence=${parsed.confidence} slotValues=${parsed.slotValues} alternatives=${parsed.alternatives}")
+            allRuns.appendLine("EVALUATED (what NLUClient.match() actually returns): matchedFlowId=${evaluated.matchedFlowId} confidence=${evaluated.confidence} status=${evaluated.status}")
+            allRuns.appendLine()
+            out.writeText(allRuns.toString())
+            if (attempt < 4) Thread.sleep(2500)
+        }
+        println("Repro (5 attempts) written to ${out.absolutePath}")
+    }
+
     private fun runOne(section: String, utterance: String, label: String, candidates: List<CandidateFlow>, rows: MutableList<String>) {
         val prompt = NluPrompt.build(utterance, candidates)
         val body = buildJsonObject {
