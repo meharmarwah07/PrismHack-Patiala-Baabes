@@ -1,5 +1,6 @@
 package com.calo.replay
 
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.view.accessibility.AccessibilityNodeInfo
@@ -7,6 +8,7 @@ import com.calo.accessibility.CaloAccessibilityService
 import com.calo.accessibility.CredentialGate
 import com.calo.accessibility.NodeWalker
 import com.calo.domain.gate.ScreenSignals
+import com.calo.domain.model.ActionType
 import com.calo.domain.model.ElementAnchor
 import com.calo.domain.model.FlowStep
 import com.calo.domain.replay.NodeHandle
@@ -56,6 +58,17 @@ private class AndroidNodeHandle(val node: AccessibilityNodeInfo) : NodeHandle
  *      matching/ambiguity algorithm respectively, both against fakes; it
  *      does not prove NodeWalker's real tree walk finds the right real
  *      AccessibilityNodeInfo by text/contentDescription.
+ *
+ * The "no device" note above predates this project's actual device testing
+ * (see the many "confirmed on-device" comments elsewhere in this file and
+ * class, 24–28 Sep) and is stale for the codebase generally. For
+ * SUBMIT_SEARCH/imeEnterApiSupported/nodeSupportsImeEnter/performImeEnter
+ * specifically (2026-09-28): verified end-to-end on a real device (API 34)
+ * against Zomato's real search field — resolve, ACTION_SET_TEXT, and
+ * ACTION_IME_ENTER all confirmed working for real, including the app
+ * genuinely navigating to search results with no coordinate-guessing
+ * involved. See CaloAccessibilityService.setIncludeNotImportantViewsRequested's
+ * doc for a related, separately-discovered gap this feature depends on.
  */
 class ReplayEngine(
     private val service: CaloAccessibilityService,
@@ -112,6 +125,12 @@ class ReplayEngine(
         cachedRoot?.recycle()
         cachedRoot = null
         service.setReplaying(true)
+        // See CaloAccessibilityService.setIncludeNotImportantViewsRequested's
+        // doc: only widened for a flow that actually has a SUBMIT_SEARCH
+        // step, not every replay -- an ordinary CLICK/SET_TEXT/SCROLL/WAIT
+        // flow never needs this and shouldn't pay for it.
+        val needsNotImportantViews = steps.any { it.action == ActionType.SUBMIT_SEARCH }
+        if (needsNotImportantViews) service.setIncludeNotImportantViewsRequested(true)
         Log.i(TAG, "Replay starting: steps=${steps.size}")
         return try {
             // The app may have just been launched (splash screen, feed still
@@ -119,6 +138,7 @@ class ReplayEngine(
             waitForStableScreen()
             ReplayPlanner.replay(steps, slotValues, this)
         } finally {
+            if (needsNotImportantViews) service.setIncludeNotImportantViewsRequested(false)
             service.setReplaying(false)
         }
     }
@@ -209,6 +229,32 @@ class ReplayEngine(
     }
 
     override fun awaitIdle() = waitForStableScreen()
+
+    // ACTION_IME_ENTER (AccessibilityAction, not a legacy ACTION_* int
+    // constant) only exists as a field on AccessibilityNodeInfo.AccessibilityAction
+    // starting API 30 — referencing it is only safe on a device that's
+    // actually API 30+, which is exactly what imeEnterApiSupported() is for.
+    // ReplayPlanner is required to check it BEFORE calling either of the two
+    // methods below (see its SUBMIT_SEARCH branch); this class doesn't
+    // re-check SDK_INT itself here — the ordering contract is ReplayPlanner's
+    // job, same as everywhere else it delegates a device-touching call.
+    override fun imeEnterApiSupported(): Boolean = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+
+    override fun nodeSupportsImeEnter(node: NodeHandle): Boolean {
+        val info = (node as AndroidNodeHandle).node
+        return info.actionList.any { it.id == AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id }
+    }
+
+    override fun performImeEnter(node: NodeHandle): Boolean {
+        val info = (node as AndroidNodeHandle).node
+        stepCounter++
+        fingerprintBeforeAction = screenFingerprint()
+        Log.i(TAG, "Replay step $stepCounter: SUBMIT_SEARCH (ACTION_IME_ENTER) target=${describe(info)}")
+        val ok = info.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)
+        Log.i(TAG, "Replay step $stepCounter: SUBMIT_SEARCH result=$ok")
+        info.recycle()
+        return ok
+    }
 
     /**
      * Confirmed on-device (Zomato, 27 Sep 2026): the next step started

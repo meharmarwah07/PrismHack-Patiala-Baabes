@@ -40,14 +40,20 @@ private class FakeNodeProvider(
     // screen, just not the same element" (e.g. a generic resourceId reused
     // across screens) -- returns a distinguishable stand-in node so a test
     // can prove a duplicate step never taps it.
-    private val differentNodeOnOccurrence: Map<String, Set<Int>> = emptyMap()
+    private val differentNodeOnOccurrence: Map<String, Set<Int>> = emptyMap(),
+    // SUBMIT_SEARCH / ACTION_IME_ENTER fakes.
+    private val imeEnterApiSupported: Boolean = false,
+    private val imeUnsupportedNodes: Set<String> = emptySet(), // ids that resolve but don't expose ACTION_IME_ENTER
+    private val imeFailingNodes: Set<String> = emptySet() // ids where performImeEnter() itself returns false
 ) : NodeProvider {
     private var callCount = 0
     val clickCalls = mutableListOf<String>()
     val setTextCalls = mutableListOf<Pair<String, String>>()
     val scrollCalls = mutableListOf<String>()
     val findNodeCalls = mutableListOf<String>()
+    val imeEnterCalls = mutableListOf<String>()
     var idleCalls = 0
+    var imeEnterApiSupportedCallCount = 0
     private val findNodeOccurrences = mutableMapOf<String, Int>()
 
     override fun currentScreenSignals(): ScreenSignals {
@@ -92,6 +98,22 @@ private class FakeNodeProvider(
 
     override fun awaitIdle() {
         idleCalls++
+    }
+
+    override fun imeEnterApiSupported(): Boolean {
+        imeEnterApiSupportedCallCount++
+        return imeEnterApiSupported
+    }
+
+    override fun nodeSupportsImeEnter(node: NodeHandle): Boolean {
+        val id = (node as FakeNode).id
+        return id !in imeUnsupportedNodes
+    }
+
+    override fun performImeEnter(node: NodeHandle): Boolean {
+        val id = (node as FakeNode).id
+        imeEnterCalls += id
+        return id !in imeFailingNodes
     }
 }
 
@@ -415,6 +437,102 @@ class ReplayPlannerTest {
 
         assertEquals(ReplayResult.Completed, result)
         assertEquals(listOf("id/pizza_row", "id/add_to_cart"), provider.clickCalls)
+    }
+
+    // ---- SUBMIT_SEARCH / ACTION_IME_ENTER (2026-09-28) ----
+
+    private fun submitSearchStep(order: Int, resourceId: String) = FlowStep(
+        order = order, action = ActionType.SUBMIT_SEARCH, target = ElementAnchor(resourceId = resourceId),
+        recordedValue = "pizza"
+    )
+
+    @Test
+    fun `SUBMIT_SEARCH on an unsupported API level is Stuck before any node is resolved`() {
+        val steps = listOf(submitSearchStep(1, "id/search_field"))
+        val provider = FakeNodeProvider(emptyMap(), clearSignals, imeEnterApiSupported = false)
+        val result = ReplayPlanner.replay(steps, emptyMap(), provider)
+
+        assertTrue(result is ReplayResult.Stuck)
+        assertEquals(1, (result as ReplayResult.Stuck).atStepOrder)
+        assertTrue(result.reason.contains("IME_ENTER_UNSUPPORTED"))
+        assertTrue(provider.findNodeCalls.isEmpty()) // never even tried to resolve the target
+        assertTrue(provider.imeEnterCalls.isEmpty())
+    }
+
+    @Test
+    fun `SUBMIT_SEARCH element not found is Stuck, same discipline as CLICK-SET_TEXT-SCROLL`() {
+        val steps = listOf(submitSearchStep(1, "id/renamed_search_field"))
+        val provider = FakeNodeProvider(
+            emptyMap(), clearSignals,
+            imeEnterApiSupported = true,
+            missingAnchors = setOf("id/renamed_search_field")
+        )
+        val result = ReplayPlanner.replay(steps, emptyMap(), provider)
+
+        assertTrue(result is ReplayResult.Stuck)
+        assertEquals(1, (result as ReplayResult.Stuck).atStepOrder)
+        assertTrue(result.reason.contains("element not found"))
+        assertTrue(provider.imeEnterCalls.isEmpty())
+    }
+
+    @Test
+    fun `SUBMIT_SEARCH on a resolved node with no ACTION_IME_ENTER in its actionList is Stuck, not a coordinate-guess fallback`() {
+        val steps = listOf(submitSearchStep(1, "id/search_field"))
+        val provider = FakeNodeProvider(
+            emptyMap(), clearSignals,
+            imeEnterApiSupported = true,
+            imeUnsupportedNodes = setOf("id/search_field")
+        )
+        val result = ReplayPlanner.replay(steps, emptyMap(), provider)
+
+        assertTrue(result is ReplayResult.Stuck)
+        assertEquals(1, (result as ReplayResult.Stuck).atStepOrder)
+        assertTrue(result.reason.contains("IME_ENTER_UNSUPPORTED"))
+        assertTrue(provider.imeEnterCalls.isEmpty()) // never invoked on a node that doesn't support it
+    }
+
+    @Test
+    fun `SUBMIT_SEARCH invokes ACTION_IME_ENTER and completes when everything checks out`() {
+        val steps = listOf(submitSearchStep(1, "id/search_field"))
+        val provider = FakeNodeProvider(emptyMap(), clearSignals, imeEnterApiSupported = true)
+        val result = ReplayPlanner.replay(steps, emptyMap(), provider)
+
+        assertEquals(ReplayResult.Completed, result)
+        assertEquals(listOf("id/search_field"), provider.imeEnterCalls)
+        assertTrue(provider.clickCalls.isEmpty()) // never falls back to a CLICK
+    }
+
+    @Test
+    fun `SUBMIT_SEARCH whose performImeEnter call itself fails is Stuck, not silently treated as success`() {
+        val steps = listOf(submitSearchStep(1, "id/search_field"))
+        val provider = FakeNodeProvider(
+            emptyMap(), clearSignals,
+            imeEnterApiSupported = true,
+            imeFailingNodes = setOf("id/search_field")
+        )
+        val result = ReplayPlanner.replay(steps, emptyMap(), provider)
+
+        assertTrue(result is ReplayResult.Stuck)
+        assertEquals(1, (result as ReplayResult.Stuck).atStepOrder)
+        assertEquals(listOf("id/search_field"), provider.imeEnterCalls) // it WAS attempted...
+    }
+
+    @Test
+    fun `SUBMIT_SEARCH still halts on a payment screen -- the gate check is not bypassed or double-run`() {
+        val steps = listOf(
+            clickStep(1, "id/menu"),
+            submitSearchStep(2, "id/search_field")
+        )
+        val signalsByCall = mapOf(1 to clearSignals, 2 to paymentSignals)
+        val provider = FakeNodeProvider(signalsByCall, defaultSignals = paymentSignals, imeEnterApiSupported = true)
+        val result = ReplayPlanner.replay(steps, emptyMap(), provider)
+
+        assertTrue(result is ReplayResult.Halted)
+        assertEquals(2, (result as ReplayResult.Halted).atStepOrder)
+        // The gate blocked before SUBMIT_SEARCH's own capability check ever
+        // ran -- proves the gate isn't special-cased away for this step.
+        assertEquals(0, provider.imeEnterApiSupportedCallCount)
+        assertTrue(provider.imeEnterCalls.isEmpty())
     }
 
     @Test

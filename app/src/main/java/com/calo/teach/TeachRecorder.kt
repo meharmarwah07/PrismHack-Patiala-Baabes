@@ -764,11 +764,23 @@ class TeachRecorder(
      *
      * So when a SEARCH box was the last thing typed into and the app then
      * moved to a new screen with no tap recorded, record "submit this
-     * search" in its place: a CLICK with no element anchor and the typed
-     * query as its value. RoleLabeler labels it SUBMIT_SEARCH, and replay
-     * grounds it by role — the result matching the query, or the
-     * keyboard's search key. Not done for other text boxes (a note, an
-     * address): there the next screen isn't a search result.
+     * search" in its place: a SUBMIT_SEARCH step targeting the search
+     * field's own identity, with the typed query as its display value.
+     * Replay resolves that same field again and invokes ACTION_IME_ENTER on
+     * it (see ReplayPlanner) — the keyboard's Enter/Search key, exactly what
+     * a real finger would have pressed here. Not done for other text boxes
+     * (a note, an address): there the next screen isn't a search result.
+     *
+     * The field anchor comes from [lastTextEntryAnchor] — the identity
+     * captured live at the field's OWN most recent keystroke (see
+     * TYPE_VIEW_TEXT_CHANGED above) — not a fresh [AccessibilityNodeInfo
+     * .findFocus] search run here. Confirmed on-device (Zomato, 28 Sep
+     * 2026): by the time this function runs, the app has already navigated
+     * to the destination screen (that navigation is the whole reason this
+     * fallback exists) — the search field and its focus are already gone
+     * from the live tree, so a delayed findFocus(FOCUS_INPUT) here finds
+     * nothing (or, worse, something on the NEW screen). The keystroke-time
+     * snapshot is the last point the field's identity was actually knowable.
      */
     private fun recordSubmitAfterTyping(actionPackage: String?, why: String) {
         val index = lastTextEntryStepIndex ?: return
@@ -777,12 +789,25 @@ class TeachRecorder(
         val isSearch = RoleLabeler.label(steps).firstOrNull { it.order == typedOrder }?.role == SemanticRole.SEARCH_INPUT
         if (!isSearch) return
 
+        val fieldAnchor = lastTextEntryAnchor ?: ElementAnchor()
+
         lastTextEntryAnchor = null
         lastTextEntryStepIndex = null
         pendingRawTouch = null
         if (actionPackage != null) latchTargetPackage(actionPackage)
-        steps += FlowStep(order = nextOrder++, action = ActionType.CLICK, target = ElementAnchor(), recordedValue = typed)
-        Log.i(TAG, "Recorded 'submit search' after typing \"$typed\" ($why): no tap was captured while the keyboard was up")
+        steps += FlowStep(
+            order = nextOrder++,
+            action = ActionType.SUBMIT_SEARCH,
+            target = fieldAnchor,
+            recordedValue = typed,
+            role = SemanticRole.SUBMIT_SEARCH
+        )
+        Log.i(
+            TAG,
+            "Recorded SUBMIT_SEARCH after typing \"$typed\" ($why): " +
+                "fieldAnchor resourceId=${fieldAnchor.resourceId} className=${fieldAnchor.className} " +
+                "contentDescription=${fieldAnchor.contentDescription} hintText=${fieldAnchor.hintText}"
+        )
     }
 
     /**

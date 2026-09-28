@@ -7,7 +7,12 @@ enum class ActionType {
     CLICK,      // ACTION_CLICK on the resolved node
     SET_TEXT,   // ACTION_SET_TEXT — typing into a field
     SCROLL,     // ACTION_SCROLL_FORWARD / BACKWARD
-    WAIT        // pause for the screen to settle before resolving the next node
+    WAIT,       // pause for the screen to settle before resolving the next node
+    // ACTION_IME_ENTER on the resolved (focused, editable) node — pressing
+    // the keyboard's Enter/Search key to submit, for apps with no separate
+    // tappable submit button. API 30+ only; see ReplayPlanner's SUBMIT_SEARCH
+    // branch for the capability/support checks this requires before use.
+    SUBMIT_SEARCH
 }
 
 /**

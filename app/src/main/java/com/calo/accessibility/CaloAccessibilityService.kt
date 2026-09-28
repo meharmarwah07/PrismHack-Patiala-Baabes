@@ -320,12 +320,18 @@ class CaloAccessibilityService : AccessibilityService() {
         lastCheckpointed = null
         checkpointTeaching()
         startRawTouchCapture()
+        // See setIncludeNotImportantViewsRequested's doc: SUBMIT_SEARCH
+        // capture needs TYPE_VIEW_TEXT_CHANGED events for fields some apps
+        // (confirmed: Zomato) mark not-important-for-accessibility, which
+        // this service otherwise never sees at all for the whole session.
+        setIncludeNotImportantViewsRequested(true)
         return recorder
     }
 
     fun stopTeaching(): TeachRecorder? {
         flushPendingRawCommit() // the last tap before Finish still counts
         stopRawTouchCapture()
+        setIncludeNotImportantViewsRequested(false)
         val recorder = teachRecorder
         teachRecorder = null
         mode = Mode.IDLE
@@ -416,6 +422,50 @@ class CaloAccessibilityService : AccessibilityService() {
 
     fun isTouchExplorationCapabilityRequested(): Boolean =
         (serviceInfo?.flags ?: 0) and AccessibilityServiceInfo.FLAG_REQUEST_TOUCH_EXPLORATION_MODE != 0
+
+    /**
+     * SUBMIT_SEARCH support (2026-09-28): confirmed on-device (Zomato,
+     * v19.9.0) that this service's tree is MISSING the search EditText
+     * entirely — rootInActiveWindow simply has no node for it — while
+     * uiautomator dump (which requests FLAG_INCLUDE_NOT_IMPORTANT_VIEWS by
+     * default) sees it fine. That's the standard signature of a node marked
+     * not-important-for-accessibility; without this flag, neither
+     * TeachRecorder's TYPE_VIEW_TEXT_CHANGED capture nor NodeWalker.resolve()
+     * at replay time can ever see this field, so SUBMIT_SEARCH would be
+     * unreachable both at teach time (falls back to an empty anchor, same
+     * as the original bug) and at replay time ("element not found" on the
+     * exact resourceId that's visibly on screen) — confirmed both ways,
+     * on-device, before this fix.
+     *
+     * NOT enabled globally: this flag widens EVERY tree walk on EVERY
+     * screen of EVERY app being taught or replayed, not just Zomato's
+     * search field — more candidates for CredentialGate's per-step scan
+     * (undoing the cachedRoot perf work), noisier candidate pools for
+     * ContextPicker/FuzzyLabel, and a real risk of resurrecting older
+     * "not important" nodes the null-source/noise-filtering fixes
+     * elsewhere in this class were specifically written to keep out.
+     * Toggled on only for the windows that actually need to see this kind
+     * of node — a full TEACHING session (recordSubmitAfterTyping needs the
+     * TYPE_VIEW_TEXT_CHANGED events to arrive at all, which is continuous
+     * event delivery, not a single call — see startTeaching/stopTeaching)
+     * and a REPLAY of a flow that contains a SUBMIT_SEARCH step (see
+     * ReplayEngine.replay) — same setServiceInfo() mechanism as
+     * [setTouchExplorationCapabilityRequested] above, applied to a
+     * different flag for a different reason.
+     */
+    fun setIncludeNotImportantViewsRequested(requested: Boolean) {
+        val info = serviceInfo ?: return
+        val before = info.flags
+        info.flags = if (requested) {
+            info.flags or AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS
+        } else {
+            info.flags and AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS.inv()
+        }
+        serviceInfo = info
+        if (BuildConfig.DEBUG) {
+            android.util.Log.i("Calo", "setServiceInfo: includeNotImportantViews requested=$requested flags $before -> ${info.flags}")
+        }
+    }
 
     /**
      * Finding 6 fallback (2026-09-26): starts raw touch-down capture for

@@ -56,4 +56,26 @@ interface NodeProvider {
 
     /** Called after every performed action: wait for whatever it triggered to finish drawing. */
     fun awaitScreenChange() {}
+
+    // ---- SUBMIT_SEARCH / ACTION_IME_ENTER. Three separate calls, not one,
+    // because ReplayPlanner's SUBMIT_SEARCH branch needs to distinguish
+    // "unsupported" (device API, or this specific field) from "supported but
+    // the action call itself failed" — see its class doc. Defaults make an
+    // older/fake provider report "not supported", which correctly surfaces
+    // as Stuck(IME_ENTER_UNSUPPORTED) rather than crashing or guessing.
+
+    /** Whether this device/OS can perform ACTION_IME_ENTER at all (API 30+). Doesn't need a resolved node. */
+    fun imeEnterApiSupported(): Boolean = false
+
+    /**
+     * Whether [node] currently exposes ACTION_IME_ENTER in its own
+     * actionList. Per Android's docs this is only true when the node is
+     * presently input-focused AND editable with an active IME session — not
+     * every editable field on a supported API level has it, even right
+     * after this same field was just resolved successfully.
+     */
+    fun nodeSupportsImeEnter(node: NodeHandle): Boolean = false
+
+    /** Invokes ACTION_IME_ENTER on [node]. False if the action didn't apply. */
+    fun performImeEnter(node: NodeHandle): Boolean = false
 }

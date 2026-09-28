@@ -102,6 +102,14 @@ object RoleLabeler {
                 else -> null
             }
 
+            // A step recorded AS a submit-search action (empty-anchor
+            // fallback promoted to a real field anchor, see TeachRecorder
+            // .recordSubmitAfterTyping) already IS this role by construction
+            // — decide() is only reached for it at all if some future caller
+            // ever strips role via relabel(), in which case this keeps the
+            // label consistent rather than falling through to null.
+            ActionType.SUBMIT_SEARCH -> SemanticRole.SUBMIT_SEARCH
+
             ActionType.SCROLL, ActionType.WAIT -> null
         }
     }

@@ -183,6 +183,27 @@ object ReplayPlanner {
                             ?: return ReplayResult.Stuck(step.order, "element not found: ${step.target}")
                         withStepTimeout(step.order, "performScroll", isAction = true) { provider.performScroll(node, forward = true) }
                     }
+                    ActionType.SUBMIT_SEARCH -> {
+                        // Capability gate BEFORE resolving anything — a
+                        // pre-API-30 device can never perform this action, no
+                        // matter what's on screen, so there's no point
+                        // spending a node lookup to find that out.
+                        if (!withStepTimeout(step.order, "imeEnterApiSupported") { provider.imeEnterApiSupported() }) {
+                            return ReplayResult.Stuck(step.order, "IME_ENTER_UNSUPPORTED: ACTION_IME_ENTER needs API 30+, this device is below that")
+                        }
+                        val node = withStepTimeout(step.order, "findNode") { provider.findNode(step.target) }
+                            ?: return ReplayResult.Stuck(step.order, "element not found: ${step.target}")
+                        // Not all editable fields expose ACTION_IME_ENTER even
+                        // on a supported API level — only when the resolved
+                        // node is currently input-focused with an active IME
+                        // session (Android's own actionList contract). A
+                        // deliberately diagnosable Stuck, never a fallback tap
+                        // at a guessed coordinate — see class doc.
+                        if (!withStepTimeout(step.order, "nodeSupportsImeEnter") { provider.nodeSupportsImeEnter(node) }) {
+                            return ReplayResult.Stuck(step.order, "IME_ENTER_UNSUPPORTED: resolved field does not currently expose ACTION_IME_ENTER")
+                        }
+                        withStepTimeout(step.order, "performImeEnter", isAction = true) { provider.performImeEnter(node) }
+                    }
                 }
 
                 if (!ok) {
