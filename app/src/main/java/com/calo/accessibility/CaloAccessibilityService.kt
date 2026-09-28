@@ -448,8 +448,19 @@ class CaloAccessibilityService : AccessibilityService() {
      * of node — a full TEACHING session (recordSubmitAfterTyping needs the
      * TYPE_VIEW_TEXT_CHANGED events to arrive at all, which is continuous
      * event delivery, not a single call — see startTeaching/stopTeaching)
-     * and a REPLAY of a flow that contains a SUBMIT_SEARCH step (see
-     * ReplayEngine.replay) — same setServiceInfo() mechanism as
+     * and the WHOLE of a REPLAY whose flow involves SUBMIT_SEARCH (see
+     * ReplayEngine.replay) — not just the SUBMIT_SEARCH step itself.
+     * Confirmed on-device (2026-09-28) that scoping it to only the
+     * SUBMIT_SEARCH action's own resolve call is too narrow: a flow whose
+     * search was submitted by tapping a suggestion (role=SUBMIT_SEARCH,
+     * action=CLICK, not the new action type at all) still failed to
+     * resolve an EARLIER, unrelated step — Zomato's plain "open search"
+     * button turned out to be not-important-for-accessibility too. Since
+     * teaching now always has the flag on, there's no reliable way to
+     * predict in advance which specific anchors in a taught flow will turn
+     * out to need it at replay — so any flow that touches this feature at
+     * all gets the flag for its whole replay, same as teaching gets it for
+     * its whole session. Same setServiceInfo() mechanism as
      * [setTouchExplorationCapabilityRequested] above, applied to a
      * different flag for a different reason.
      */
