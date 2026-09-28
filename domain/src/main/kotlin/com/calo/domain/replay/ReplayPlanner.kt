@@ -123,8 +123,20 @@ object ReplayPlanner {
         return ReplayResult.Completed
     }
 
+    // Compares identity fields only (the ones NodeWalker's resolver actually
+    // searches by — see ElementAnchor's own doc) — not the full ElementAnchor
+    // equality. contextLabel is captured live from surrounding screen text at
+    // each tap (see ContextPicker) and hintText is documented as "not used to
+    // re-find the element"; both can legitimately differ between two taps on
+    // the SAME element captured moments apart during a UI transition (e.g. a
+    // search bar mid-open), which silently defeated this check for exactly
+    // the capture-artifact case it exists to catch (2026-09-28, on-device).
     private fun isDuplicateClick(step: FlowStep, previous: FlowStep?): Boolean =
         step.action == ActionType.CLICK &&
             previous?.action == ActionType.CLICK &&
-            previous.target == step.target
+            previous.target.resourceId == step.target.resourceId &&
+            previous.target.text == step.target.text &&
+            previous.target.contentDescription == step.target.contentDescription &&
+            previous.target.className == step.target.className &&
+            previous.target.indexInParent == step.target.indexInParent
 }
