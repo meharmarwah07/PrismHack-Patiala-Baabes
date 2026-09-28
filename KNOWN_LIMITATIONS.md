@@ -1,4 +1,38 @@
-# Calo — known limitations (23 Sep 2026, updated 25 Sep 2026)
+# Calo — known limitations (23 Sep 2026, updated 25 Sep 2026, updated 28 Sep 2026)
+
+## 28 Sep 2026 — a timed-out action step is not guaranteed cancelled
+
+`ReplayPlanner` now bounds every `NodeProvider` call with a 5000ms timeout
+(see the fix committed this session for the underlying hang this closes).
+For a read-only call (`currentScreenSignals`/`findNode`/`findNodeByValue`/
+`awaitIdle`) that's the whole story: the call is abandoned, nothing on the
+device changed, replay reports `Stuck` and stops safely.
+
+For an *action* call — `performClick`/`performSetText`/`performScroll` —
+it is not the whole story. The timeout gives up waiting on the Kotlin side
+by calling `future.cancel(true)`, but that is best-effort against a
+genuinely blocked Binder IPC call into the target app's process; a blocked
+native call is not guaranteed to honor `Thread.interrupt()`. If the tap/
+type/scroll was already in flight when we gave up on it, it can still land
+for real on the device seconds later, after Calo has already told the user
+"stuck" and (in the worst case) after the user has already said "stop."
+
+Mitigated, not fixed, this session: `ReplayResult.Stuck` now carries
+`actionMayHaveExecuted`, set true only for a timed-out action call.
+`CaloOrchestrator.handleReplayResult()` checks this before asking its
+usual "should I pick something else, or stop?" question — when true, it
+skips that question entirely (never offers retry, since a second action on
+top of a possibly-already-executed one is exactly the double-fire risk
+being avoided) and goes straight to a stop, telling the user out loud that
+the last action may not have completed cleanly. This narrows the blast
+radius (no automatic retry stacks a second action on the uncertain one,
+and the user is told the truth instead of a falsely-confident status) but
+does not and cannot guarantee the original action didn't fire. There is no
+clean fix available for this before freeze — you cannot reliably cancel a
+blocked native IPC call from the JVM side. Treat "a taught flow occasionally
+performs one extra, unrequested tap/type/scroll after reporting Stuck, on a
+device/screen combination slow enough to hit the 5000ms timeout" as a real,
+accepted residual risk, not a hypothetical.
 
 ## 25 Sep 2026 — live-device T1 test session findings
 
