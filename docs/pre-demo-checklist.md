@@ -92,11 +92,35 @@ Confirm both apps open straight to their logged-in home screen with no
 `CredentialGate` may false-trigger on (see
 [known-limitations.md](known-limitations.md), Finding 1).
 
+Also clear Zomato's recent-search / search-history state before the final
+teach and before judging. A taught flow that relies on tapping a recent
+search entry (instead of typing the query fresh) will not replay on a fresh
+account or after a DB wipe, because that shortcut won't exist there.
+
 ## 7. Battery and screen timeout
 
 Set screen timeout to the longest available option (or disable it) and
 charge/plug in the phone. A screen lock mid-replay looks identical to "app
 became unresponsive" from Calo's side and reports Stuck.
+
+## 8. Teaching technique for live judging
+
+Traced tonight's T1 Zomato failures (wrong item added, duplicate consecutive
+steps) to fast/imprecise teaching, not a code bug. Apply this every time a
+flow is taught, including on judging day:
+
+- Teach with single, deliberate taps — one action, brief pause, confirm the
+  screen shows what you expect, then proceed. Do not tap rapidly or tap the
+  same element more than once "to be sure."
+- If a screen is slow to respond, wait for it rather than re-tapping.
+- After teaching, always dump/review the saved flow's steps before relying on
+  it — check for duplicate consecutive steps or an unexpected item/anchor,
+  and re-teach immediately if something looks wrong rather than proceeding to
+  replay testing on a bad flow.
+- Replay the flow once immediately after teaching it, before moving to the
+  next flow or the next slot type. A step list that looks correct can still
+  fail at replay (timing, stale node references) — catch that per-flow, not
+  in a stacked final test pass.
 
 ## Order matters
 
