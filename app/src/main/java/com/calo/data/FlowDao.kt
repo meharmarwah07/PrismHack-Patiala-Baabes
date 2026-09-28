@@ -20,6 +20,11 @@ interface FlowDao {
     @Query("SELECT * FROM learned_flows")
     suspend fun getAll(): List<LearnedFlow>
 
+    // Saved Workflows screen's "used : N" / "last used : ..." — bumped once
+    // per real replay attempt (see CaloOrchestrator.handleUtterance).
+    @Query("UPDATE learned_flows SET usageCount = usageCount + 1, lastUsedAt = :timestamp WHERE id = :id")
+    suspend fun recordUsage(id: String, timestamp: Long)
+
     @Delete
     suspend fun delete(flow: LearnedFlow)
 

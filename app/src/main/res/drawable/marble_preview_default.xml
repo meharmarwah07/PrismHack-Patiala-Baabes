@@ -1,4 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  A fixed-color preview swatch for the "Default" option on the Themes
+  screen — deliberately literal colors, not ?attr/caloColor... ones: this
+  has to look the same regardless of which theme is currently active, since
+  it's depicting the OTHER option a user might not be on right now.
+-->
 <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
 
     <item>
@@ -22,10 +28,10 @@
     </item>
 
     <item
-        android:top="34dp"
-        android:bottom="34dp"
-        android:left="34dp"
-        android:right="34dp">
+        android:top="20dp"
+        android:bottom="20dp"
+        android:left="20dp"
+        android:right="20dp">
         <shape android:shape="oval">
             <gradient
                 android:type="sweep"

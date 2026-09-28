@@ -22,5 +22,7 @@ data class LearnedFlow(
     val description: String,         // human-readable label, e.g. shown in "Learned: ..."
     val steps: List<FlowStep>,        // stored as JSON via Converters, see below
     val slots: List<SlotDefinition>,  // stored as JSON via Converters, see below
-    val createdAt: Long = System.currentTimeMillis()
+    val createdAt: Long = System.currentTimeMillis(),
+    val usageCount: Int = 0,          // incremented by FlowRepository.recordUsage, see CaloOrchestrator
+    val lastUsedAt: Long? = null      // null = never replayed since being taught
 )

@@ -1,0 +1,148 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Slide-out nav drawer content, included by every screen's DrawerLayout
+  (see NavDrawerController.kt, which wires clicks + the selected/unselected
+  visual state, and each activity_*.xml, which includes this as the
+  drawer's second child).
+-->
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="280dp"
+    android:layout_height="match_parent"
+    android:layout_gravity="start"
+    android:background="?attr/caloColorBackground"
+    android:orientation="vertical"
+    android:paddingTop="48dp"
+    android:paddingBottom="24dp">
+
+    <!-- Drawer header: tapping "Calo" returns to the home screen, same as the launcher icon would. -->
+    <TextView
+        android:id="@+id/navHomeTitle"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="?attr/selectableItemBackground"
+        android:clickable="true"
+        android:focusable="true"
+        android:fontFamily="sans-serif-medium"
+        android:paddingStart="24dp"
+        android:paddingEnd="24dp"
+        android:paddingTop="12dp"
+        android:paddingBottom="20dp"
+        android:text="@string/app_name"
+        android:textColor="?attr/caloColorAccentStart"
+        android:textSize="24sp" />
+
+    <LinearLayout
+        android:id="@+id/navItemDashboard"
+        style="@style/NavDrawerRow">
+        <ImageView
+            android:id="@+id/navIconDashboard"
+            style="@style/NavDrawerIcon"
+            android:src="@drawable/ic_nav_dashboard"
+            android:contentDescription="@null" />
+        <TextView
+            android:id="@+id/navLabelDashboard"
+            style="@style/NavDrawerLabel"
+            android:text="@string/nav_dashboard" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/navItemThemes"
+        style="@style/NavDrawerRow">
+        <!-- Not tinted like the other icons: it always depicts whichever
+             theme is actually active (Default vs BlackWhite), independent
+             of this row's selected/unselected state — see
+             NavDrawerController.setThemeBall. -->
+        <View
+            android:id="@+id/navThemeBall"
+            style="@style/NavDrawerIcon"
+            android:background="@drawable/shape_theme_ball_default" />
+        <TextView
+            android:id="@+id/navLabelThemes"
+            style="@style/NavDrawerLabel"
+            android:text="@string/nav_themes" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/navItemSettings"
+        style="@style/NavDrawerRow">
+        <ImageView
+            android:id="@+id/navIconSettings"
+            style="@style/NavDrawerIcon"
+            android:src="@drawable/ic_nav_settings"
+            android:contentDescription="@null" />
+        <TextView
+            android:id="@+id/navLabelSettings"
+            style="@style/NavDrawerLabel"
+            android:text="@string/nav_settings" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/navItemHelp"
+        style="@style/NavDrawerRow">
+        <ImageView
+            android:id="@+id/navIconHelp"
+            style="@style/NavDrawerIcon"
+            android:src="@drawable/ic_nav_help"
+            android:contentDescription="@null" />
+        <TextView
+            android:id="@+id/navLabelHelp"
+            style="@style/NavDrawerLabel"
+            android:text="@string/nav_help" />
+    </LinearLayout>
+
+    <Space
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1" />
+
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:layout_marginStart="24dp"
+        android:layout_marginEnd="24dp"
+        android:layout_marginBottom="12dp"
+        android:background="#26FFFFFF" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="24dp"
+        android:layout_marginEnd="24dp"
+        android:layout_marginBottom="8dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <ImageView
+            style="@style/NavDrawerIcon"
+            android:src="@drawable/ic_nav_dark_mode"
+            android:contentDescription="@null"
+            android:tint="?attr/caloColorTextPrimary" />
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/nav_dark_mode"
+            android:textColor="?attr/caloColorTextPrimary"
+            android:textSize="15sp" />
+
+        <Switch
+            android:id="@+id/navDarkModeSwitch"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:checked="true" />
+
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/navVersionText"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="24dp"
+        android:layout_marginEnd="24dp"
+        android:text="@string/nav_version"
+        android:textColor="?attr/caloColorTextSecondary"
+        android:textSize="11sp" />
+
+</LinearLayout>

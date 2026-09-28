@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Custom theme attributes so Default vs BlackWhite (see themes.xml) can
+  re-skin every screen and drawable by resolving these at runtime, instead
+  of layouts/drawables pointing at literal @color values that only one
+  theme could ever match.
+-->
+<resources>
+    <attr name="caloColorBackground" format="color" />
+    <attr name="caloColorSurface" format="color" />
+
+    <!-- Marble's outer gradient + brand accent (title text, selected states) -->
+    <attr name="caloColorAccentStart" format="color" />
+    <attr name="caloColorAccentEnd" format="color" />
+
+    <attr name="caloColorButtonBg" format="color" />
+    <attr name="caloColorButtonText" format="color" />
+
+    <attr name="caloColorTextPrimary" format="color" />
+    <attr name="caloColorTextSecondary" format="color" />
+</resources>

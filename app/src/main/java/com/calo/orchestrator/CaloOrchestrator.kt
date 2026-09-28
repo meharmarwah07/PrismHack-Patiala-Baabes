@@ -166,6 +166,13 @@ class CaloOrchestrator(context: Context) {
                     "Replaying: ${matchedFlow.description}"
                 }
             )
+            // Counts as "used" here, not only on a Completed result: the
+            // Saved Workflows screen's usage stat is about how many times
+            // the user actually invoked the flow by voice, the same way a
+            // Halted/Stuck attempt is still a real attempt worth surfacing —
+            // not a claim that it always finished successfully.
+            repository.recordUsage(matchedFlow.id)
+
             val engine = ReplayEngine(service)
             // Off the main thread: replay sleeps while screens settle.
             val result = withContext(Dispatchers.Default) { engine.replay(steps, match.slotValues, mode) }

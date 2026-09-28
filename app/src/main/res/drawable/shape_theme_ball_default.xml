@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Themes row's leading "ball" when the Default theme is active. Deliberately
+  literal colors, not ?attr/caloColor... ones — this has to depict the
+  DEFAULT theme specifically, regardless of which theme is actually
+  rendering the drawer right now (see NavDrawerController.setThemeBall).
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="oval">
+    <gradient
+        android:type="linear"
+        android:angle="315"
+        android:startColor="@color/calo_swirl_magenta"
+        android:endColor="@color/calo_orange" />
+</shape>

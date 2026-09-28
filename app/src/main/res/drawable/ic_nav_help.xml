@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Drawer row icon — see ic_nav_dashboard.xml's comment on why paths are white, not ?attr. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="1.6"
+        android:pathData="M12,12 m-8,0 a8,8 0 1,1 16,0 a8,8 0 1,1 -16,0" />
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="1.6"
+        android:strokeLineCap="round"
+        android:pathData="M9.5,9.3 a2.6,2.4 0 1,1 3.9,2.1 C12.4,12.1 12,12.6 12,13.6" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M12,16.1 m-1.1,0 a1.1,1.1 0 1,1 2.2,0 a1.1,1.1 0 1,1 -2.2,0" />
+</vector>

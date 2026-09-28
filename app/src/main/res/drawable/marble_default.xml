@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Home screen marble, Default theme. Literal colors, not ?attr/caloColor...
+  ones — MainActivity picks this file vs marble_blackwhite.xml explicitly by
+  ThemePrefs (see setMarbleBackground()), the same way NavDrawerController
+  picks the Themes row's ball, so there's no need for attr indirection here.
+
+  Ring layers are the original hand-drawn gradient/solid shapes; the
+  innermost layer is now the real swirl artwork from Figma
+  (marble_swirl_default.png, drawable-nodpi) instead of a flat sweep
+  gradient — see the 29 Sep 2026 "detailed sphere" pass.
+-->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <item>
+        <shape android:shape="oval">
+            <gradient
+                android:type="linear"
+                android:angle="45"
+                android:startColor="@color/calo_coral"
+                android:endColor="@color/calo_orange" />
+        </shape>
+    </item>
+
+    <item
+        android:top="7dp"
+        android:bottom="7dp"
+        android:left="7dp"
+        android:right="7dp">
+        <shape android:shape="oval">
+            <solid android:color="@color/calo_peach" />
+        </shape>
+    </item>
+
+    <item
+        android:top="34dp"
+        android:bottom="34dp"
+        android:left="34dp"
+        android:right="34dp">
+        <bitmap
+            android:src="@drawable/marble_swirl_default"
+            android:gravity="fill" />
+    </item>
+
+</layer-list>
