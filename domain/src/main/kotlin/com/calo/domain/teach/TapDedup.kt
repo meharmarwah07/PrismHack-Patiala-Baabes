@@ -34,8 +34,26 @@ object TapDedup {
         }
         if (!a.contentDescription.isNullOrBlank() && a.contentDescription == b.contentDescription) return true
         if (!a.text.isNullOrBlank() && a.text == b.text) return true
+        if (labelNests(label(a), label(b))) return true
         return a.className != null && a.className == b.className && a.indexInParent == b.indexInParent &&
             a.text.isNullOrBlank() && b.text.isNullOrBlank() &&
             a.contentDescription.isNullOrBlank() && b.contentDescription.isNullOrBlank()
+    }
+
+    private fun label(a: ElementAnchor): String? =
+        a.contentDescription?.takeIf { it.isNotBlank() } ?: a.text?.takeIf { it.isNotBlank() }
+
+    /**
+     * A web link and the title inside it: one tap seen twice, once as the
+     * link ("Skribbl https://skribbl.io Skribbl") and once as its title text
+     * ("Skribbl") — confirmed on-device, Chrome / Google results, 27 Sep
+     * 2026. The longer label must START with the shorter one as a whole
+     * word, so "Pizza" vs "Pizza Hut" nests but "Hut" vs "Pizza Hut" doesn't.
+     */
+    private fun labelNests(x: String?, y: String?): Boolean {
+        if (x == null || y == null) return false
+        val (short, long) = if (x.length <= y.length) x.trim() to y.trim() else y.trim() to x.trim()
+        return short.isNotEmpty() && long.length > short.length &&
+            long.startsWith(short) && long[short.length].isWhitespace()
     }
 }

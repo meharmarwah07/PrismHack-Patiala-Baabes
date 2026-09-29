@@ -149,6 +149,21 @@ class ReplayPlannerTest {
     }
 
     @Test
+    fun `a web link recorded twice (link, then its title) skips the second copy and carries on`() {
+        // Chrome / Google results, 27 Sep 2026: one tap on the Skribbl result
+        // saved as the link and again as its title; the site is already open
+        // by the second, so it can't be found — the flow must still reach Play!.
+        val steps = listOf(
+            FlowStep(order = 1, action = ActionType.CLICK, target = ElementAnchor(contentDescription = "Skribbl https://skribbl.io Skribbl")),
+            FlowStep(order = 2, action = ActionType.CLICK, target = ElementAnchor(resourceId = "_Z064_45", text = "Skribbl")),
+            FlowStep(order = 3, action = ActionType.CLICK, target = ElementAnchor(text = "Play!"))
+        )
+        val provider = FakeNodeProvider(emptyMap(), clearSignals, missingAnchors = setOf("_Z064_45"))
+        assertEquals(ReplayResult.Completed, ReplayPlanner.replay(steps, emptyMap(), provider))
+        assertEquals(listOf("unknown", "Play!"), provider.clickCalls)
+    }
+
+    @Test
     fun `ACTION_SET_TEXT returning false (custom widget) is Stuck, not treated as success`() {
         val steps = listOf(setTextStep(1, "id/weird_custom_field", "hello"))
         val provider = FakeNodeProvider(emptyMap(), clearSignals, failingActions = setOf("id/weird_custom_field"))

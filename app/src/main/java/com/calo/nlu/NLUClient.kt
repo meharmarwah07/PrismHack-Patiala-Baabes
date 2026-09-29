@@ -72,31 +72,39 @@ class NLUClient(
                 return@withContext MatchResult(matchedFlowId = null)
             }
 
-            val prompt = NluPrompt.build(utterance, candidates)
-            val requestBody = buildRequestBody(prompt)
-
-            val request = Request.Builder()
-                .url(ENDPOINT)
-                .header("Authorization", "Bearer $apiKey")
-                .post(requestBody.toString().toRequestBody(JSON_MEDIA_TYPE))
-                .build()
-
-            val rawContent = try {
-                client.newCall(request).execute().use { response ->
-                    if (!response.isSuccessful) {
-                        android.util.Log.e("NLUClient", "Groq call failed: HTTP ${response.code}")
-                        return@withContext MatchResult(matchedFlowId = null)
-                    }
-                    val bodyString = response.body?.string() ?: return@withContext MatchResult(matchedFlowId = null)
-                    extractMessageContent(bodyString)
-                }
-            } catch (e: IOException) {
-                android.util.Log.e("NLUClient", "Groq call threw", e)
-                return@withContext MatchResult(matchedFlowId = null)
-            }
-
+            val rawContent = complete(NluPrompt.build(utterance, candidates))
             NluResponseParser.parse(rawContent ?: return@withContext MatchResult(matchedFlowId = null))
         }
+
+    /**
+     * One prompt in, the model's raw reply out — null on a missing key or
+     * any network/HTTP/shape failure (logged). BLOCKS on the network: call
+     * it off the main thread. Shared by [match] and the AI helper
+     * (AgentLoop, via ReplayEngine.finishWithAgent).
+     */
+    fun complete(prompt: String): String? {
+        if (apiKey.isBlank()) {
+            android.util.Log.e("NLUClient", "GROQ_API_KEY is not set; see app/build.gradle.kts")
+            return null
+        }
+        val request = Request.Builder()
+            .url(ENDPOINT)
+            .header("Authorization", "Bearer $apiKey")
+            .post(buildRequestBody(prompt).toString().toRequestBody(JSON_MEDIA_TYPE))
+            .build()
+        return try {
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    android.util.Log.e("NLUClient", "Groq call failed: HTTP ${response.code}")
+                    return null
+                }
+                response.body?.string()?.let { extractMessageContent(it) }
+            }
+        } catch (e: IOException) {
+            android.util.Log.e("NLUClient", "Groq call threw", e)
+            null
+        }
+    }
 
     private fun buildRequestBody(prompt: String) = buildJsonObject {
         put("model", model)

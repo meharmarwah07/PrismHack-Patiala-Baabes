@@ -56,4 +56,21 @@ interface NodeProvider {
 
     /** Called after every performed action: wait for whatever it triggered to finish drawing. */
     fun awaitScreenChange() {}
+
+    // ---- AI helper (AgentLoop). Same default-off convention as above.
+
+    /** All visible text on screen, in order — context for the AI helper. */
+    fun screenTexts(): List<String> = emptyList()
+
+    /** Taps whatever element shows exactly [text] (text or content description). False if none. */
+    fun tapText(text: String): Boolean {
+        val node = findNodeByValue(text) ?: return false
+        return performClick(node)
+    }
+
+    /** Scrolls the main scrollable area of the screen. False if nothing moved. */
+    fun scrollScreen(forward: Boolean): Boolean = false
+
+    /** The system Back button. */
+    fun pressBack(): Boolean = false
 }

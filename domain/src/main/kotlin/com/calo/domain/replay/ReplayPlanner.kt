@@ -10,6 +10,7 @@ import com.calo.domain.semantic.RoleMatch
 import com.calo.domain.semantic.RoleMatcher
 import com.calo.domain.semantic.SemanticRole
 import com.calo.domain.slots.SlotResolver
+import com.calo.domain.teach.TapDedup
 
 /**
  * How a flow is grounded on the screen.
@@ -83,10 +84,14 @@ object ReplayPlanner {
         return ReplayResult.Completed
     }
 
-    /** Same tap on the same element as the step just before it. */
+    /**
+     * Same tap on the same element as the step just before it. Not strict
+     * anchor equality: a web link was recorded once as the link and once as
+     * its title text (Chrome, 27 Sep 2026) — see TapDedup.isSameElement.
+     */
     private fun isDuplicateCapture(step: FlowStep, previous: FlowStep?): Boolean =
         previous != null && step.action == ActionType.CLICK && previous.action == ActionType.CLICK &&
-            step.target == previous.target && step.slotName == null
+            TapDedup.isSameElement(step.target, previous.target) && step.slotName == null
 
     private fun gateCheck(step: FlowStep, provider: NodeProvider): ReplayResult? {
         val verdict = CredentialGateRules.classify(provider.currentScreenSignals())

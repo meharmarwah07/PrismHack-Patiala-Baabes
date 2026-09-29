@@ -5,6 +5,7 @@ import android.content.Intent
 import com.calo.accessibility.CaloAccessibilityService
 import com.calo.data.FlowRepository
 import com.calo.data.LearnedFlow
+import com.calo.domain.agent.AgentTaskBuilder
 import com.calo.domain.model.FlowStep
 import com.calo.domain.model.SlotDefinition
 import com.calo.domain.nlu.CandidateFlow
@@ -175,7 +176,29 @@ class CaloOrchestrator(context: Context) {
 
             val engine = ReplayEngine(service)
             // Off the main thread: replay sleeps while screens settle.
-            val result = withContext(Dispatchers.Default) { engine.replay(steps, match.slotValues, mode) }
+            val replayed = withContext(Dispatchers.Default) { engine.replay(steps, match.slotValues, mode) }
+
+            // Exact replay is free, so it always goes first; only when it
+            // gets Stuck does the AI helper take over from the current
+            // screen, with the taught steps as hints. Never after Halted —
+            // a safety stop is final.
+            val result = if (replayed !is ReplayResult.Stuck) replayed else {
+                val stuck: ReplayResult.Stuck = replayed
+                android.util.Log.i("Calo", "Replay stuck at step ${stuck.atStepOrder} (${stuck.reason}) — handing over to AI helper")
+                onStatus("Step ${stuck.atStepOrder} didn't match — letting AI finish it...")
+                val task = AgentTaskBuilder.from(
+                    spokenCommand = utterance,
+                    triggerUtterance = matchedFlow.triggerUtterance,
+                    description = matchedFlow.description,
+                    appName = appLabel(targetPackage),
+                    steps = steps,
+                    slotValues = match.slotValues,
+                    stuckAtOrder = stuck.atStepOrder
+                )
+                withContext(Dispatchers.Default) {
+                    engine.finishWithAgent(task, stuck.atStepOrder) { prompt -> nluClient.complete(prompt) }
+                }
+            }
             announceResult(describeResult(result), onStatus)
         }
     }

@@ -460,6 +460,46 @@ class NodeWalker {
         return ScreenSnapshot(elements, nodes)
     }
 
+    /**
+     * The largest visible scrollable node on screen (the main feed / page,
+     * not a small horizontal carousel), for the AI helper's "scroll".
+     * Caller owns and recycles the result; [root] is borrowed.
+     */
+    fun findMainScrollable(root: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
+        if (root == null) return null
+        var best: AccessibilityNodeInfo? = null
+        var bestArea = 0L
+        val rect = Rect()
+        var visited = 0
+
+        fun walk(node: AccessibilityNodeInfo, isRoot: Boolean) {
+            if (++visited > MAX_SNAPSHOT_NODES) {
+                if (!isRoot) node.recycle()
+                return
+            }
+            var kept = false
+            if (node.isScrollable && node.isVisibleToUser) {
+                node.getBoundsInScreen(rect)
+                val area = rect.width().toLong() * rect.height().toLong()
+                if (area > bestArea) {
+                    if (best !== root) best?.recycle()
+                    best = node
+                    bestArea = area
+                    kept = true
+                }
+            }
+            for (i in 0 until node.childCount) {
+                val child = node.getChild(i) ?: continue
+                walk(child, isRoot = false)
+            }
+            if (!kept && !isRoot) node.recycle()
+        }
+        walk(root, isRoot = true)
+        val chosen = best ?: return null
+        @Suppress("DEPRECATION")
+        return if (chosen === root) AccessibilityNodeInfo.obtain(root) else chosen
+    }
+
     private fun isListContainer(node: AccessibilityNodeInfo): Boolean {
         if (node.collectionInfo != null) return true
         val cls = node.className?.toString() ?: return false
@@ -490,12 +530,23 @@ class NodeWalker {
      * if no clickable ancestor exists before the window root. Every
      * intermediate ancestor visited but not chosen is recycled; [node] is
      * recycled too if a better (different) ancestor is returned instead.
+     *
+     * Never climbs out of a web page: the WebView itself is often the only
+     * "clickable" node above a link, so climbing to it turned a tap on a
+     * search result into a tap on the whole page, anchored by the page's
+     * first text — Google's "Go to Google Home" logo (Chrome, 27 Sep 2026).
+     * Inside a page, the element under the finger is the anchor.
      */
     private fun nearestClickableAncestor(node: AccessibilityNodeInfo): AccessibilityNodeInfo {
         if (node.isClickable) return node
         var previous: AccessibilityNodeInfo? = null
         var ancestor = node.parent
         while (ancestor != null) {
+            if (ancestor.className?.toString() == "android.webkit.WebView") {
+                ancestor.recycle()
+                previous?.recycle()
+                return node
+            }
             if (ancestor.isClickable) {
                 previous?.recycle()
                 node.recycle()

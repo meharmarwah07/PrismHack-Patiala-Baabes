@@ -8,6 +8,8 @@ import com.calo.accessibility.CaloAccessibilityService
 import com.calo.accessibility.CredentialGate
 import com.calo.accessibility.NodeWalker
 import com.calo.accessibility.ScreenSnapshot
+import com.calo.domain.agent.AgentLoop
+import com.calo.domain.agent.AgentTask
 import com.calo.domain.gate.ScreenSignals
 import com.calo.domain.model.ElementAnchor
 import com.calo.domain.model.FlowStep
@@ -72,7 +74,11 @@ class ReplayEngine(
 
         // How long findNode keeps looking for an anchor that isn't on
         // screen yet (a list still loading after the screen "settled").
-        const val FIND_RETRY_MS = 1500L
+        // Web pages in a browser routinely take longer than 1.5s to draw
+        // their buttons after navigation (skribbl.io's "Play!" was missed
+        // at 1.5s, 27 Sep 2026), so this is generous; a genuinely missing
+        // element just reports Stuck a few seconds later.
+        const val FIND_RETRY_MS = 6000L
 
         // After an action, how long to wait for the screen to start
         // changing before assuming the action doesn't navigate anywhere.
@@ -115,6 +121,42 @@ class ReplayEngine(
             lastSnapshot = null
             service.setReplaying(false)
         }
+    }
+
+    /**
+     * Hands the rest of a Stuck replay to the AI helper (AgentLoop), from
+     * whatever screen replay stopped on. Blocks like [replay]; call it off
+     * the main thread. [llm] must block too (NLUClient.complete does).
+     */
+    fun finishWithAgent(task: AgentTask, stuckAtOrder: Int, llm: (String) -> String?): ReplayResult {
+        service.setReplaying(true)
+        Log.i(TAG, "AI helper starting at step $stuckAtOrder: goal=${task.goal} hints=${task.hints}")
+        return try {
+            AgentLoop.run(task, stuckAtOrder, this, llm, log = { Log.i(TAG, it) })
+        } finally {
+            lastSnapshot?.release()
+            lastSnapshot = null
+            service.setReplaying(false)
+        }
+    }
+
+    override fun screenTexts(): List<String> = nodeWalker.collectAllText(service.currentRoot())
+
+    // No retry loop, unlike findNodeByValue: the AI is looking at the screen
+    // as it is right now, and a miss is reported straight back to it.
+    override fun tapText(text: String): Boolean {
+        val node = nodeWalker.findByValue(service.currentRoot(), text) ?: return false
+        return performClick(AndroidNodeHandle(node))
+    }
+
+    override fun scrollScreen(forward: Boolean): Boolean {
+        val node = nodeWalker.findMainScrollable(service.currentRoot()) ?: return false
+        return performScroll(AndroidNodeHandle(node), forward)
+    }
+
+    override fun pressBack(): Boolean {
+        fingerprintBeforeAction = screenFingerprint()
+        return service.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK)
     }
 
     private fun describe(info: AccessibilityNodeInfo): String =
@@ -180,6 +222,22 @@ class ReplayEngine(
         stepCounter++
         fingerprintBeforeAction = screenFingerprint()
         Log.i(TAG, "Replay step $stepCounter: CLICK target=${describe(info)}")
+        // Web content (a browser page, Google's search results) often
+        // reports ACTION_CLICK as successful without following the link, so
+        // the finger-tap fallback below never ran and replay carried on
+        // from the wrong page (skribbl.io result on Google, 27 Sep 2026).
+        // Inside a web page, tap it like a finger instead.
+        if (isInsideWebView(info)) {
+            val bounds = android.graphics.Rect()
+            info.getBoundsInScreen(bounds)
+            if (!bounds.isEmpty && info.isVisibleToUser &&
+                service.tapAt(bounds.exactCenterX(), bounds.exactCenterY())
+            ) {
+                Log.i(TAG, "Replay step $stepCounter: web content, finger-tap at (${bounds.centerX()},${bounds.centerY()})")
+                info.recycle()
+                return true
+            }
+        }
         var ok = info.performAction(AccessibilityNodeInfo.ACTION_CLICK)
         Log.i(TAG, "Replay step $stepCounter: CLICK result=$ok")
         if (!ok) {
@@ -193,6 +251,25 @@ class ReplayEngine(
         }
         info.recycle()
         return ok
+    }
+
+    /** True if [node] is, or sits inside, a WebView (browsers expose page content this way). [node] is borrowed. */
+    private fun isInsideWebView(node: AccessibilityNodeInfo): Boolean {
+        if (node.className?.toString() == "android.webkit.WebView") return true
+        var ancestor = node.parent
+        var depth = 0
+        while (ancestor != null && depth < 40) {
+            if (ancestor.className?.toString() == "android.webkit.WebView") {
+                ancestor.recycle()
+                return true
+            }
+            val next = ancestor.parent
+            ancestor.recycle()
+            ancestor = next
+            depth++
+        }
+        ancestor?.recycle()
+        return false
     }
 
     override fun performSetText(node: NodeHandle, value: String): Boolean {

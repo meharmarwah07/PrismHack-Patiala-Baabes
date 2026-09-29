@@ -41,6 +41,20 @@ class TapDedupTest {
         assertFalse(TapDedup.isSameElement(a, a.copy(indexInParent = 1)))
     }
 
+    @Test
+    fun `a web link and the title text inside it are the same tap`() {
+        val link = ElementAnchor(contentDescription = "Skribbl https://skribbl.io Skribbl", className = "android.view.View", indexInParent = 0)
+        val title = ElementAnchor(resourceId = "_Z064aoypEZXAjuMPx_newA0_45", text = "Skribbl", className = "android.view.View", indexInParent = 0)
+        assertTrue(TapDedup.isSameElement(link, title))
+        assertTrue(TapDedup.isSameElement(title, link))
+    }
+
+    @Test
+    fun `a label that only appears mid-word or later in another is not the same tap`() {
+        assertFalse(TapDedup.isSameElement(ElementAnchor(text = "Hut"), ElementAnchor(text = "Pizza Hut")))
+        assertFalse(TapDedup.isSameElement(ElementAnchor(text = "Skrib"), ElementAnchor(text = "Skribbl io")))
+    }
+
     // ---- ContextPicker: which of several identical ADD buttons ----
 
     private val taught = "Crispy Veg Burger. | Highly reordered | ₹70 | Get for ₹59 | Our Best Seller - Crispy Veg Patty"
