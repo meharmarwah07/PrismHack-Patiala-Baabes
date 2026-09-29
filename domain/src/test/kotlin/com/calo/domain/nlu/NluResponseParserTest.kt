@@ -87,4 +87,60 @@ class NluResponseParserTest {
         assertNull(NluResponseParser.parse("""{"matchedFlowId": "f", "targetApp": null}""").targetApp)
         assertNull(NluResponseParser.parse("""{"matchedFlowId": "f", "targetApp": "null"}""").targetApp)
     }
+
+    // --- T1: slot extraction edge cases ---
+
+    @Test
+    fun `missing slot -- omitted from slotValues is simply absent, not a crash`() {
+        val raw = """{"matchedFlowId": "flow-1", "slotValues": {}, "confidence": 0.9}"""
+        val result = NluResponseParser.parse(raw)
+        assertEquals("flow-1", result.matchedFlowId)
+        assertTrue(result.slotValues.isEmpty())
+    }
+
+    @Test
+    fun `extra slot the parser has no candidate list to validate against is passed through as-is`() {
+        // The parser deliberately doesn't know which slots the matched candidate actually
+        // declared (see the class doc) -- filtering an unexpected key is the caller's job.
+        val raw = """{"matchedFlowId": "flow-1", "slotValues": {"item": "Pepperoni", "gift_wrap": "yes"}, "confidence": 0.9}"""
+        val result = NluResponseParser.parse(raw)
+        assertEquals(mapOf("item" to "Pepperoni", "gift_wrap" to "yes"), result.slotValues)
+    }
+
+    @Test
+    fun `JSON wrapped in explanatory prose is extracted despite instructions to return only JSON`() {
+        val raw = """Sure, here's the match: {"matchedFlowId": "flow-1", "slotValues": {"item": "Pepperoni"}, "confidence": 0.9} Let me know if that's wrong!"""
+        val result = NluResponseParser.parse(raw)
+        assertEquals("flow-1", result.matchedFlowId)
+        assertEquals(mapOf("item" to "Pepperoni"), result.slotValues)
+    }
+
+    @Test
+    fun `JSON wrapped in both prose and markdown fences is extracted`() {
+        val raw = "Here you go:\n```json\n{\"matchedFlowId\": \"flow-1\", \"slotValues\": {}, \"confidence\": 0.9}\n```\nHope that helps!"
+        val result = NluResponseParser.parse(raw)
+        assertEquals("flow-1", result.matchedFlowId)
+    }
+
+    // --- T13: alternatives parsing ---
+
+    @Test
+    fun `alternatives array is parsed into flowId-confidence pairs`() {
+        val raw = """{"matchedFlowId": "flow-1", "slotValues": {}, "confidence": 0.5, "alternatives": [{"flowId": "flow-2", "confidence": 0.5}]}"""
+        val result = NluResponseParser.parse(raw)
+        assertEquals(listOf(Alternative("flow-2", 0.5)), result.alternatives)
+    }
+
+    @Test
+    fun `missing alternatives field defaults to an empty list rather than crashing`() {
+        val raw = """{"matchedFlowId": "flow-1", "slotValues": {}, "confidence": 0.9}"""
+        assertTrue(NluResponseParser.parse(raw).alternatives.isEmpty())
+    }
+
+    @Test
+    fun `a malformed alternative entry (missing confidence) is skipped, not fatal to the rest`() {
+        val raw = """{"matchedFlowId": "flow-1", "slotValues": {}, "confidence": 0.9, "alternatives": [{"flowId": "flow-2"}, {"flowId": "flow-3", "confidence": 0.2}]}"""
+        val result = NluResponseParser.parse(raw)
+        assertEquals(listOf(Alternative("flow-3", 0.2)), result.alternatives)
+    }
 }

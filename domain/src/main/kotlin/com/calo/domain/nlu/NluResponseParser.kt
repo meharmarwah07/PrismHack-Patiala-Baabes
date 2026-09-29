@@ -6,6 +6,7 @@ import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
@@ -26,7 +27,7 @@ object NluResponseParser {
     private val json = Json { ignoreUnknownKeys = true }
 
     fun parse(raw: String): MatchResult {
-        val cleaned = stripMarkdownFence(raw)
+        val cleaned = extractJsonObject(raw)
         val element = runCatching { json.parseToJsonElement(cleaned) }.getOrNull()
             ?: return MatchResult(matchedFlowId = null)
 
@@ -50,6 +51,20 @@ object NluResponseParser {
             ?.coerceIn(0.0, 1.0)
             ?: 0.0
 
+        val alternatives: List<Alternative> = obj["alternatives"]
+            ?.let { runCatching { it.jsonArray }.getOrNull() }
+            ?.mapNotNull { el ->
+                val altObj = runCatching { el.jsonObject }.getOrNull() ?: return@mapNotNull null
+                val id = (altObj["flowId"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() && it != "null" }
+                    ?: return@mapNotNull null
+                val conf = altObj["confidence"]
+                    ?.let { runCatching { it.jsonPrimitive.doubleOrNull }.getOrNull() }
+                    ?.coerceIn(0.0, 1.0)
+                    ?: return@mapNotNull null
+                Alternative(id, conf)
+            }
+            ?: emptyList()
+
         // A matchedFlowId with no candidate backing it is still "matched" from
         // the parser's point of view — NLUClient/orchestrator is responsible
         // for checking the id against the actual candidate list it sent, since
@@ -58,8 +73,34 @@ object NluResponseParser {
             matchedFlowId = matchedFlowId,
             slotValues = slotValues,
             confidence = confidence,
-            targetApp = targetApp
+            targetApp = targetApp,
+            alternatives = alternatives
         )
+    }
+
+    /**
+     * Strips markdown fences AND, if the model wrapped the JSON in prose
+     * ("Sure, here's the match: {...}") despite instructions not to, pulls
+     * out the first balanced {...} block instead of failing outright.
+     */
+    private fun extractJsonObject(raw: String): String {
+        val trimmed = stripMarkdownFence(raw)
+        if (trimmed.startsWith("{") && trimmed.endsWith("}")) return trimmed
+
+        val start = trimmed.indexOf('{')
+        if (start == -1) return trimmed
+
+        var depth = 0
+        for (i in start until trimmed.length) {
+            when (trimmed[i]) {
+                '{' -> depth++
+                '}' -> {
+                    depth--
+                    if (depth == 0) return trimmed.substring(start, i + 1)
+                }
+            }
+        }
+        return trimmed
     }
 
     /** Missing, JSON null, blank, or the literal string "null" all mean "not given". */

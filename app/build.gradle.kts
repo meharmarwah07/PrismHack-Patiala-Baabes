@@ -72,6 +72,15 @@ android {
             signingConfig = signingConfigs.getByName("debug")
         }
     }
+
+    // NLUClient calls android.util.Log; returnDefaultValues makes that a
+    // harmless no-op under plain JVM unit tests instead of throwing, so
+    // NLUClientTest doesn't need Robolectric just to exercise error paths.
+    testOptions {
+        unitTests {
+            isReturnDefaultValues = true
+        }
+    }
 }
 
 dependencies {
@@ -91,5 +100,7 @@ dependencies {
 
     testImplementation("junit:junit:4.13.2")
     testImplementation(project(":domain"))
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
 }

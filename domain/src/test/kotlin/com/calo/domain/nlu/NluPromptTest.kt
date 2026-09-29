@@ -42,4 +42,34 @@ class NluPromptTest {
         assertTrue(prompt.contains("learned on app: \"Amazon\""))
         assertTrue(prompt.contains("targetApp"))
     }
+
+    @Test
+    fun `sends the value each slot was taught with, not just its name`() {
+        val candidates = listOf(
+            CandidateFlow(
+                "flow-1", "order a margherita pizza", "Orders a pizza",
+                listOf("item"), slotExampleValues = mapOf("item" to "Margherita")
+            )
+        )
+        val prompt = NluPrompt.build("get me two pepperonis", candidates)
+        assertTrue(prompt.contains("item (taught as \"Margherita\")"))
+    }
+
+    @Test
+    fun `instructs the model to omit an unmentioned slot rather than guess or repeat the taught value`() {
+        val prompt = NluPrompt.build("x", emptyList())
+        assertTrue(prompt.contains("OMIT it from slotValues"))
+    }
+
+    @Test
+    fun `asks for a ranked alternatives list for ambiguity detection`() {
+        val prompt = NluPrompt.build("x", emptyList())
+        assertTrue(prompt.contains("alternatives"))
+    }
+
+    @Test
+    fun `instructs the model not to arbitrarily favor a candidate when the command is genuinely ambiguous`() {
+        val prompt = NluPrompt.build("x", emptyList())
+        assertTrue(prompt.contains("do NOT arbitrarily pick a favorite"))
+    }
 }
