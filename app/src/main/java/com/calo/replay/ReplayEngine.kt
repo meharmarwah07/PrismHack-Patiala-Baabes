@@ -8,6 +8,8 @@ import com.calo.accessibility.CaloAccessibilityService
 import com.calo.accessibility.CredentialGate
 import com.calo.accessibility.NodeWalker
 import com.calo.accessibility.ScreenSnapshot
+import com.calo.domain.agent.AgentLoop
+import com.calo.domain.agent.AgentTask
 import com.calo.domain.gate.ScreenSignals
 import com.calo.domain.model.ElementAnchor
 import com.calo.domain.model.FlowStep
@@ -172,6 +174,47 @@ class ReplayEngine(
             lastSnapshot = null
             service.setReplaying(false)
         }
+    }
+
+    /**
+     * Hands the rest of a Stuck replay to the AI helper (AgentLoop), from
+     * whatever screen replay stopped on. Blocks like [replay]; call it off
+     * the main thread. [llm] must block too (NLUClient.complete does).
+     */
+    fun finishWithAgent(task: AgentTask, stuckAtOrder: Int, llm: (String) -> String?): ReplayResult {
+        cachedRoot?.recycle()
+        cachedRoot = null
+        service.setReplaying(true)
+        service.setIncludeNotImportantViewsRequested(true)
+        Log.i(TAG, "AI helper starting at step $stuckAtOrder: goal=${task.goal} hints=${task.hints}")
+        return try {
+            AgentLoop.run(task, stuckAtOrder, this, llm, log = { Log.i(TAG, it) })
+        } finally {
+            service.setIncludeNotImportantViewsRequested(false)
+            lastSnapshot?.release()
+            lastSnapshot = null
+            service.setReplaying(false)
+        }
+    }
+
+    override fun screenTexts(): List<String> = nodeWalker.collectAllText(service.currentRoot())
+
+    // No retry loop, unlike findNode/findNodeByValue: the AI is looking at
+    // the screen as it is right now, and a miss is reported straight back
+    // to it as this turn's outcome rather than silently waited out.
+    override fun tapText(text: String): Boolean {
+        val node = nodeWalker.findByValue(service.currentRoot(), text) ?: return false
+        return performClick(AndroidNodeHandle(node))
+    }
+
+    override fun scrollScreen(forward: Boolean): Boolean {
+        val node = nodeWalker.findMainScrollable(service.currentRoot()) ?: return false
+        return performScroll(AndroidNodeHandle(node), forward)
+    }
+
+    override fun pressBack(): Boolean {
+        fingerprintBeforeAction = screenFingerprint()
+        return service.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK)
     }
 
     private fun describe(info: AccessibilityNodeInfo): String =

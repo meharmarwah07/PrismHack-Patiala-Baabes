@@ -65,6 +65,17 @@ class NLUClient(
         // isn't guaranteed generous enough as candidate lists grow. 1024 gives wide
         // headroom over the ~150-token completions actually observed.
         private const val MAX_COMPLETION_TOKENS = 1024
+
+        // The AI helper's action-selection prompt (AgentPrompt, :domain) is a
+        // fundamentally more deliberative task than utterance-matching -- it
+        // weighs a whole screen's worth of elements against several hints and
+        // its own action history, and reasons harder still right after a
+        // rejected/failed previous action (confirmed live, 29 Sep 2026: a
+        // "hello" flow's helper hit finish_reason=length on back-to-back
+        // turns at 1024, including once immediately after AgentLoop reported
+        // its prior action invalid). Same truncation failure mode as
+        // MAX_COMPLETION_TOKENS' doc, just a task that needs more headroom.
+        private const val AGENT_MAX_COMPLETION_TOKENS = 3072
     }
 
     private val json = Json { ignoreUnknownKeys = true }
@@ -144,10 +155,57 @@ class NLUClient(
             NluMatchEvaluator.evaluate(NluResponseParser.parse(rawContent))
         }
 
-    private fun buildRequestBody(prompt: String) = buildJsonObject {
+    /**
+     * One prompt in, the model's raw reply out — null on a missing key, a
+     * failed HTTP call, a network/timeout exception, or a truncated
+     * completion (same finish_reason="length" check [match] applies, since
+     * the AI helper's replies are short JSON too and can hit the same
+     * reasoning-budget truncation).
+     *
+     * Deliberately NOT suspend, unlike [match]: this is called as the plain
+     * blocking `(String) -> String?` callback AgentLoop expects (same
+     * "blocks, call off the main thread" contract as every ReplayEngine
+     * perform* method), from inside ReplayEngine.finishWithAgent, which its
+     * own caller already runs on Dispatchers.Default — there's no separate
+     * dispatcher hop to make here the way [match] needs one when called
+     * directly from a Dispatchers.Main coroutine. Used by the AI helper
+     * (AgentLoop) — a second caller of the same Groq transport [match]
+     * already uses, not a parallel one.
+     */
+    fun complete(prompt: String): String? {
+        if (apiKey.isBlank()) {
+            android.util.Log.e("NLUClient", "GROQ_API_KEY is not set; see app/build.gradle.kts")
+            return null
+        }
+        val request = Request.Builder()
+            .url(endpoint)
+            .header("Authorization", "Bearer $apiKey")
+            .post(buildRequestBody(prompt, AGENT_MAX_COMPLETION_TOKENS).toString().toRequestBody(JSON_MEDIA_TYPE))
+            .build()
+        val message = try {
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    android.util.Log.e("NLUClient", "Groq call failed: HTTP ${response.code}")
+                    return null
+                }
+                val bodyString = response.body?.string() ?: return null
+                extractMessage(bodyString)
+            }
+        } catch (e: IOException) {
+            android.util.Log.e("NLUClient", "Groq call threw", e)
+            return null
+        }
+        if (message?.finishReason == "length") {
+            android.util.Log.e("NLUClient", "AI helper: Groq truncated before emitting a full reply (finish_reason=length)")
+            return null
+        }
+        return message?.content
+    }
+
+    private fun buildRequestBody(prompt: String, maxCompletionTokens: Int = MAX_COMPLETION_TOKENS) = buildJsonObject {
         put("model", model)
         put("temperature", 0.0) // deterministic matching, not creative
-        put("max_completion_tokens", MAX_COMPLETION_TOKENS)
+        put("max_completion_tokens", maxCompletionTokens)
         putJsonArray("messages") {
             addJsonObject {
                 put("role", "user")

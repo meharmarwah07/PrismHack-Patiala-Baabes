@@ -15,6 +15,7 @@ import android.view.accessibility.AccessibilityManager
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import com.calo.BuildConfig
+import com.calo.domain.gate.GateCacheDecision
 import com.calo.domain.gate.GateVerdict
 import com.calo.domain.teach.RawTouchCaptureGate
 import com.calo.domain.teach.TapGesture
@@ -75,6 +76,16 @@ class CaloAccessibilityService : AccessibilityService() {
         // reconnect only if it was last touched this recently; an older one
         // is abandoned rather than surprising the user with teaching mode.
         private const val RESUME_TEACHING_MAX_AGE_MS = 30 * 60 * 1000L
+
+        // See the TYPE_WINDOW_CONTENT_CHANGED throttle in onAccessibilityEvent.
+        private const val CONTENT_CHANGED_TEACH_THROTTLE_MS = 150L
+
+        // See gateCache's doc. Short backstop for whatever invalidateGateCache()'s
+        // eager window-change invalidation misses — deliberately well under
+        // normal human tap-to-tap pacing, so it only ever collapses redundant
+        // walks within one continuous gesture/burst on an unchanged screen,
+        // never masks a real navigation between two deliberate taps.
+        private const val GATE_CACHE_TTL_MS = 250L
     }
 
     var mode: Mode = Mode.IDLE
@@ -104,9 +115,39 @@ class CaloAccessibilityService : AccessibilityService() {
     private var gestureNotTap = false
     private lateinit var teachCheckpoint: TeachCheckpoint
     private var lastCheckpointed: Pair<List<FlowStep>, String?>? = null
+    // Main thread only (set/read exclusively from onAccessibilityEvent) — see CONTENT_CHANGED_TEACH_THROTTLE_MS's use.
+    private var lastContentChangedProcessedAtMs = 0L
 
     private val handler = Handler(Looper.getMainLooper())
     private val credentialGate = CredentialGate(packageName = { currentPackageName() })
+
+    // Perf fix (29 Sep 2026, tap-freeze investigation, Step 2 — see
+    // CaloTapTiming/CaloCredentialGatePerf's docs for the on-device
+    // measurements this answers): raw-touch capture's own credentialGate.
+    // check() call, cached for GATE_CACHE_TTL_MS per package via
+    // GateCacheDecision (:domain, unit-tested). Confirmed on-device: the
+    // SAME 176-node Zomato screen took 68-529ms to walk via
+    // AccessibilityNodeInfo.getChild()'s cross-process IPC, unconditionally
+    // on EVERY touch-down (including ones that turn out to be scrolls, not
+    // taps) on touchWorker's single-threaded queue — one slow walk delayed
+    // every touch behind it, which is what made the phone feel frozen while
+    // teaching on a dense screen.
+    //
+    // ONLY wired in here, for teaching's raw-touch capture (deciding
+    // whether a tap gets RECORDED) — NOT inside CredentialGate itself, so
+    // ReplayEngine's own separate CredentialGate instance (deciding whether
+    // Calo is ALLOWED to tap something for real) is completely untouched:
+    // that gate is still checked fully fresh before every single replay
+    // step, exactly as ReplayPlanner's class doc requires. See
+    // GateCacheDecision's doc for the full safety reasoning.
+    //
+    // @Volatile: written on touchWorker's background thread (the only
+    // writer), read there too; volatile only so gateCache = null from
+    // invalidateGateCache() (main thread, on a real window-change event)
+    // is guaranteed visible to the next touchWorker read without a lock —
+    // there's no read-modify-write race to guard against, just visibility.
+    @Volatile private var gateCache: GateCacheEntry? = null
+    private class GateCacheEntry(val verdict: GateVerdict, val packageName: String, val atMs: Long)
     private val accessibilityManager: AccessibilityManager
         get() = getSystemService(AccessibilityManager::class.java)
     private var touchInteractionController: TouchInteractionController? = null
@@ -181,12 +222,62 @@ class CaloAccessibilityService : AccessibilityService() {
         if (mode == Mode.TEACHING && event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED) {
             updateKeyboardVisibility()
         }
+        // gateCache's eager invalidation half (see its doc): both event
+        // types fire for a real navigation (a new screen, a dialog/sheet
+        // appearing) — broader than strictly necessary is the safe
+        // direction to err in here, and GATE_CACHE_TTL_MS is short besides.
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
+            event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED
+        ) {
+            invalidateGateCache()
+        }
         if (mode == Mode.TEACHING) {
-            logRawEventForTeachDebugging(event)
-            teachRecorder?.rawTouchCaptureLive = touchInteractionController != null && !keyboardVisible
-            teachRecorder?.keyboardVisible = keyboardVisible
-            teachRecorder?.onAccessibilityEvent(event, currentRoot())
-            checkpointTeaching()
+            // Perf fix (29 Sep 2026, tap-freeze investigation continued —
+            // this is what was still causing it after the raw-touch gate
+            // cache fix): confirmed on-device, Zomato's home feed fires
+            // TYPE_WINDOW_CONTENT_CHANGED 30-40 TIMES PER SECOND while it's
+            // loading/animating (1691 of 1695 events in one capture; a
+            // sustained ~25-35ms gap between them) — with NOTHING to do
+            // with a click/scroll/type, TeachRecorder.onAccessibilityEvent's
+            // own `when` block already falls through to `else -> Unit` for
+            // it. But by the time it gets there, EVERY one of those events
+            // has already paid for logRawEventForTeachDebugging's own
+            // event.source Binder fetch, a currentRoot() Binder fetch, AND
+            // refreshGoodRootCache's bounded-but-nonzero countVisibleTextNodes
+            // walk (itself already fixed once for a real ANR on this exact
+            // screen — see that function's doc — but that fix bounded the
+            // COST of one call, not how often it's called). At 30-40 calls/
+            // sec sustained, that's still enough main-thread Binder IPC
+            // traffic to make the whole phone feel frozen, with zero benefit
+            // since nothing downstream uses the result for this event type.
+            //
+            // Throttled, not skipped outright: refreshGoodRootCache's own
+            // doc explains a content-changed event can genuinely arrive
+            // right before the null-source click it needs to recover — this
+            // keeps that working (150ms is well inside human tap-reaction
+            // time, and goodRootHistory already keeps several recent roots
+            // as slack for not being the literal immediately-preceding
+            // event), while cutting the worst-case rate by 5-8x. Every
+            // OTHER event type (clicks, scrolls, typing, window/state
+            // changes) is completely unaffected — those are the ones that
+            // actually carry teaching signal, and are nowhere near this
+            // frequency from a real person's taps.
+            val now = System.currentTimeMillis()
+            val throttled = event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED &&
+                now - lastContentChangedProcessedAtMs < CONTENT_CHANGED_TEACH_THROTTLE_MS
+            if (!throttled) {
+                if (event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
+                    lastContentChangedProcessedAtMs = now
+                } else {
+                    // Only content-changed floods like this; logged for every
+                    // other type same as always, at their much lower natural rate.
+                    logRawEventForTeachDebugging(event)
+                }
+                teachRecorder?.rawTouchCaptureLive = touchInteractionController != null && !keyboardVisible
+                teachRecorder?.keyboardVisible = keyboardVisible
+                teachRecorder?.onAccessibilityEvent(event, currentRoot())
+                checkpointTeaching()
+            }
         }
     }
 
@@ -703,7 +794,7 @@ class CaloAccessibilityService : AccessibilityService() {
                 val timing = if (BuildConfig.DEBUG) TapTiming() else null
                 val candidate = recorder.resolveTouchAnchor(rawX.toInt(), rawY.toInt(), root, credentialGateClear = true, touchOnKeyboard = touchOnKeyboard, timing = timing)
                 val credentialGateStart = System.nanoTime()
-                val credentialGateClear = candidate == null || credentialGate.check(root) is GateVerdict.Clear
+                val credentialGateClear = candidate == null || gateClearCached(root, actionPackage) is GateVerdict.Clear
                 val credentialGateNanos = System.nanoTime() - credentialGateStart
                 val anchor = candidate.takeIf { credentialGateClear }
                 if (BuildConfig.DEBUG) {
@@ -727,6 +818,38 @@ class CaloAccessibilityService : AccessibilityService() {
                 root?.recycle()
             }
         }
+    }
+
+    /**
+     * [credentialGate.check] for raw-touch capture, reusing a cached
+     * verdict per [gateCache]'s doc when [GateCacheDecision] (:domain) says
+     * it's still fresh enough — else walks for real and refreshes the
+     * cache. Only ever called from touchWorker (single-threaded), so no
+     * synchronization is needed beyond gateCache's own [Volatile].
+     * [actionPackage] null (couldn't read the screen) always walks for
+     * real: CredentialGateRules already fails closed on that case, and a
+     * null-keyed cache entry would be a footgun to reuse correctly.
+     */
+    private fun gateClearCached(root: AccessibilityNodeInfo?, actionPackage: String?): GateVerdict {
+        if (actionPackage == null) return credentialGate.check(root)
+        val cached = gateCache
+        val nowMs = System.currentTimeMillis()
+        if (GateCacheDecision.shouldReuse(cached?.packageName, cached?.atMs, actionPackage, nowMs, GATE_CACHE_TTL_MS)) {
+            return cached!!.verdict
+        }
+        val verdict = credentialGate.check(root)
+        gateCache = GateCacheEntry(verdict, actionPackage, nowMs)
+        return verdict
+    }
+
+    /**
+     * Drops the cached gate verdict so the next raw touch always walks the
+     * screen fresh — called on any real window-change signal (see call
+     * sites), the eager half of gateCache's safety story; GATE_CACHE_TTL_MS
+     * is only the backstop for whatever this misses.
+     */
+    private fun invalidateGateCache() {
+        gateCache = null
     }
 
     private fun trackGestureMove(x: Float, y: Float) {

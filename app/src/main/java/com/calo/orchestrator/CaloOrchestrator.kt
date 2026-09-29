@@ -6,6 +6,7 @@ import android.view.accessibility.AccessibilityNodeInfo
 import com.calo.accessibility.CaloAccessibilityService
 import com.calo.data.FlowRepository
 import com.calo.data.LearnedFlow
+import com.calo.domain.agent.AgentTaskBuilder
 import com.calo.domain.model.ElementAnchor
 import com.calo.domain.model.FlowStep
 import com.calo.domain.model.SlotDefinition
@@ -301,7 +302,13 @@ class CaloOrchestrator(context: Context) {
         flow: LearnedFlow,
         slotValues: Map<String, String>,
         onStatus: (String) -> Unit,
-        targetApp: String? = null
+        targetApp: String? = null,
+        // What the user actually said, for the AI helper's goal if replay
+        // gets stuck. Falls back to the flow's own trigger phrase for call
+        // sites (askForMissingSlot's "which X?" answer) that don't have the
+        // original command handy — AgentTaskBuilder reads the same either
+        // way when the two already match.
+        spokenCommand: String = flow.triggerUtterance
     ) {
         val taughtPackage = flow.targetPackage
         val targetPackage = if (targetApp != null) {
@@ -338,32 +345,46 @@ class CaloOrchestrator(context: Context) {
 
         val engine = ReplayEngine(service)
         val result = withContext(Dispatchers.Default) { engine.replay(steps, slotValues, mode) }
-        handleReplayResult(engine, steps, slotValues, result, onStatus, mode = mode)
+        handleReplayResult(
+            engine, steps, slotValues, result, onStatus, mode = mode,
+            flow = flow, spokenCommand = spokenCommand, targetPackage = targetPackage
+        )
     }
 
     /**
-
-     * Task 2 (Lane B): a Stuck result is never surfaced as a bare "Replay
-     * failed" — this builds a specific question (StuckQuestion, :domain),
-     * shows AND speaks it, then takes the answer by voice: "stop" (or a
-     * synonym) aborts cleanly, anything else recognized is retried as the
-     * new text/label to match for the exact step that got stuck (steps
-     * after it then continue normally). A voice-recognition failure or an
-     * empty utterance repeats the question once before giving up —
-     * StuckAnswerHandler (:domain, unit-tested) makes that decision; this
-     * function is just the Android-side glue (TTS + SpeechRecognizer)
-     * around it. Completed/Halted results are unaffected — Halted (the
-     * credential gate) is a final safety stop, never a question.
+     * A Stuck result is never surfaced as a bare "Replay failed": first the
+     * AI helper (AgentLoop, :domain) gets ONE silent attempt to finish the
+     * task itself from whatever's on screen, taking the taught steps as
+     * hints rather than a script it has to match exactly — this is what
+     * actually recovers from a flow that drifted somewhere the recorded
+     * anchors don't describe (e.g. a web search landing on a results page
+     * instead of the taught site), which a same-step retry can't. Gated by
+     * [agentEligible] to exactly once per voice command: if the helper also
+     * ends up Stuck, control falls through to the existing human flow below
+     * rather than trying the AI again.
+     *
+     * That human flow (Task 2, Lane B) builds a specific question
+     * (StuckQuestion, :domain), shows AND speaks it, then takes the answer
+     * by voice: "stop" (or a synonym) aborts cleanly, anything else
+     * recognized is retried as the new text/label to match for the exact
+     * step that got stuck (steps after it then continue normally). A
+     * voice-recognition failure or an empty utterance repeats the question
+     * once before giving up — StuckAnswerHandler (:domain, unit-tested)
+     * makes that decision; this function is just the Android-side glue
+     * (TTS + SpeechRecognizer) around it. Completed/Halted results are
+     * unaffected either way — Halted (the credential gate) is a final
+     * safety stop, never a question, and never handed to the AI helper.
      *
      * Exception (2026-09-28): a Stuck whose [ReplayResult.Stuck.
      * actionMayHaveExecuted] is true came from a timed-out tap/type/scroll
      * that may still land on the device later, unsupervised — see that
-     * field's doc. Retrying here would risk a second, uncontrolled action
-     * stacking on top of one that might already be in flight, and "should I
-     * pick something else, or stop?" is actively misleading when the honest
-     * answer is "I don't know what just happened." This case skips the
-     * question entirely and goes straight to a stop, with the uncertainty
-     * said out loud rather than papered over.
+     * field's doc. Retrying here (by AI or by voice) would risk a second,
+     * uncontrolled action stacking on top of one that might already be in
+     * flight, and "should I pick something else, or stop?" is actively
+     * misleading when the honest answer is "I don't know what just
+     * happened." This case skips both recovery paths entirely and goes
+     * straight to a stop, with the uncertainty said out loud rather than
+     * papered over.
      */
     private suspend fun handleReplayResult(
         engine: ReplayEngine,
@@ -372,7 +393,11 @@ class CaloOrchestrator(context: Context) {
         result: ReplayResult,
         onStatus: (String) -> Unit,
         attempt: Int = 1,
-        mode: ReplayMode = ReplayMode.EXACT
+        mode: ReplayMode = ReplayMode.EXACT,
+        flow: LearnedFlow? = null,
+        spokenCommand: String? = null,
+        targetPackage: String? = null,
+        agentEligible: Boolean = true
     ) {
         if (result !is ReplayResult.Stuck) {
             onStatus(describeResult(result))
@@ -386,6 +411,28 @@ class CaloOrchestrator(context: Context) {
             return
         }
 
+        if (agentEligible && flow != null && spokenCommand != null && targetPackage != null) {
+            onStatus("Step ${result.atStepOrder} didn't match — letting AI finish it...")
+            val task = AgentTaskBuilder.from(
+                spokenCommand = spokenCommand,
+                triggerUtterance = flow.triggerUtterance,
+                description = flow.description,
+                appName = appLabel(targetPackage),
+                steps = steps,
+                slotValues = slotValues,
+                stuckAtOrder = result.atStepOrder
+            )
+            val agentResult = withContext(Dispatchers.Default) {
+                engine.finishWithAgent(task, result.atStepOrder) { prompt -> nluClient.complete(prompt) }
+            }
+            handleReplayResult(
+                engine, steps, slotValues, agentResult, onStatus, mode = mode,
+                flow = flow, spokenCommand = spokenCommand, targetPackage = targetPackage,
+                agentEligible = false // one AI attempt per voice command, win or lose
+            )
+            return
+        }
+
         val stuckStep = steps.find { it.order == result.atStepOrder }
         val question = StuckQuestion.build(stuckStep?.target ?: ElementAnchor(), result.atStepOrder)
         onStatus(question)
@@ -394,7 +441,10 @@ class CaloOrchestrator(context: Context) {
         val outcome = listenForStuckAnswer()
         when (val action = StuckAnswerHandler.handle(outcome, attempt)) {
             StuckAction.Stop -> onStatus("Stopped.")
-            StuckAction.Repeat -> handleReplayResult(engine, steps, slotValues, result, onStatus, attempt = attempt + 1, mode = mode)
+            StuckAction.Repeat -> handleReplayResult(
+                engine, steps, slotValues, result, onStatus, attempt = attempt + 1, mode = mode,
+                flow = flow, spokenCommand = spokenCommand, targetPackage = targetPackage, agentEligible = false
+            )
             is StuckAction.Retry -> {
                 val remaining = steps.filter { it.order >= result.atStepOrder }
                 val target = remaining.first()
@@ -409,7 +459,10 @@ class CaloOrchestrator(context: Context) {
 
                 onStatus("Trying \"${action.newValue}\" instead...")
                 val retryResult = engine.replay(retrySteps, retrySlotValues, mode)
-                handleReplayResult(engine, retrySteps, retrySlotValues, retryResult, onStatus, attempt = 1, mode = mode)
+                handleReplayResult(
+                    engine, retrySteps, retrySlotValues, retryResult, onStatus, attempt = 1, mode = mode,
+                    flow = flow, spokenCommand = spokenCommand, targetPackage = targetPackage, agentEligible = false
+                )
             }
         }
     }
