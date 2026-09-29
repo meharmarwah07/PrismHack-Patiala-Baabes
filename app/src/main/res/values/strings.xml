@@ -43,8 +43,6 @@
     <string name="nav_help">Help &amp; Feedback</string>
     <string name="nav_dark_mode">Dark Mode</string>
     <string name="nav_version">Calo Version 1.0.0</string>
-    <string name="nav_dark_mode_unavailable">Light mode isn\'t built yet</string>
-    <string name="nav_settings_unavailable">Settings isn\'t built yet</string>
     <string name="nav_help_unavailable">Help &amp; Feedback isn\'t built yet</string>
 
     <!-- Themes screen -->
@@ -62,4 +60,25 @@
     <string name="saved_workflow_used_never">used : never</string>
     <string name="saved_workflow_last_used">last used : %1$s</string>
     <string name="saved_workflow_last_used_never">last used : never</string>
+    <string name="saved_workflows_delete_content_description">Delete selected</string>
+    <string name="saved_workflows_delete_none_selected">Tap a workflow to select it, then delete it here.</string>
+    <string name="saved_workflows_delete_confirm_title">Delete workflows?</string>
+    <string name="saved_workflows_delete_confirm_action">Delete</string>
+
+    <!-- Settings screen -->
+    <string name="settings_title">SETTINGS</string>
+    <string name="settings_account_details">Account Details</string>
+    <string name="settings_account_name_hint">Name</string>
+    <string name="settings_account_name_placeholder">Tap to add your name</string>
+    <string name="settings_account_name_dialog_title">Your name</string>
+    <string name="settings_permissions">Permissions</string>
+    <string name="settings_permission_accessibility">Accessibility</string>
+    <string name="settings_permission_microphone">Microphone</string>
+    <string name="settings_permission_already_granted">Already granted — manage it in App info if you want to revoke it.</string>
+    <string name="settings_permission_denied_permanently">Denied permanently — enable it from App info instead.</string>
+
+    <plurals name="saved_workflows_delete_confirm_message">
+        <item quantity="one">Delete this workflow? This can\'t be undone.</item>
+        <item quantity="other">Delete these %1$d workflows? This can\'t be undone.</item>
+    </plurals>
 </resources>

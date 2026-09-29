@@ -18,4 +18,15 @@
 
     <attr name="caloColorTextPrimary" format="color" />
     <attr name="caloColorTextSecondary" format="color" />
+
+    <!-- Subtle separators (unselected card border, drawer divider) — a
+         translucent overlay that has to flip white-on-dark vs
+         black-on-light, unlike every other color above which is a flat
+         per-theme swap. -->
+    <attr name="caloColorDivider" format="color" />
+
+    <!-- Selected-row fill on Saved Workflows (a translucent tint of that
+         theme's accent — can't derive this from caloColorAccentStart alone
+         at a fixed alpha in XML across 4 different accent colors). -->
+    <attr name="caloColorRowSelected" format="color" />
 </resources>

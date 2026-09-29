@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Saved Workflows row, selected-for-delete state — a tinted fill on top of the same border bg_workflow_row.xml already uses. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="?attr/caloColorRowSelected" />
+    <corners android:radius="10dp" />
+    <stroke android:width="2dp" android:color="?attr/caloColorAccentStart" />
+</shape>

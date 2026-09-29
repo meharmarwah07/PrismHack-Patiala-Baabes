@@ -18,10 +18,10 @@ enum class NavDestination { DASHBOARD, THEMES, SETTINGS, HELP }
  * Wires the included view_nav_drawer.xml for one Activity: highlights
  * [current], and navigates each row. Dashboard has no screen of its own yet
  * (per product decision, 29 Sep 2026) so it goes straight to
- * SavedWorkflowsActivity; Settings/Help have no mockup yet either, so they
- * get the same visible "isn't built yet" no-op MainActivity already used for
- * its own menu/profile buttons before this drawer existed — a silently dead
- * tap would read as a bug, not an unbuilt screen.
+ * SavedWorkflowsActivity; Help has no mockup yet either, so it gets the same
+ * visible "isn't built yet" no-op MainActivity already used for its own
+ * menu/profile buttons before this drawer existed — a silently dead tap
+ * would read as a bug, not an unbuilt screen.
  */
 class NavDrawerController(
     private val activity: Activity,
@@ -60,21 +60,22 @@ class NavDrawerController(
         }
         activity.findViewById<View>(R.id.navItemSettings).setOnClickListener {
             drawerLayout.closeDrawers()
-            Toast.makeText(activity, R.string.nav_settings_unavailable, Toast.LENGTH_SHORT).show()
+            if (current != NavDestination.SETTINGS) SettingsActivity.start(activity)
         }
         activity.findViewById<View>(R.id.navItemHelp).setOnClickListener {
             drawerLayout.closeDrawers()
             Toast.makeText(activity, R.string.nav_help_unavailable, Toast.LENGTH_SHORT).show()
         }
 
-        // Calo is dark-only for now — no light theme exists to switch to.
-        // Reverting the toggle (rather than leaving it showing "off" with no
-        // effect) keeps the switch honest about what state is actually applied.
-        activity.findViewById<Switch>(R.id.navDarkModeSwitch).setOnCheckedChangeListener { button, isChecked ->
-            if (!isChecked) {
-                Toast.makeText(activity, R.string.nav_dark_mode_unavailable, Toast.LENGTH_SHORT).show()
-                button.isChecked = true
-            }
+        // Reflects the REAL current mode, set before the listener is attached
+        // so restoring this state on setup doesn't itself trigger a recreate.
+        val darkModeSwitch = activity.findViewById<Switch>(R.id.navDarkModeSwitch)
+        darkModeSwitch.isChecked = ThemePrefs.get(activity).mode == ThemePrefs.Mode.DARK
+        darkModeSwitch.setOnCheckedChangeListener { _, isChecked ->
+            val mode = if (isChecked) ThemePrefs.Mode.DARK else ThemePrefs.Mode.LIGHT
+            if (mode == ThemePrefs.get(activity).mode) return@setOnCheckedChangeListener
+            ThemePrefs.setMode(activity, mode)
+            activity.recreate()
         }
     }
 
@@ -95,11 +96,15 @@ class NavDrawerController(
         }
     }
 
-    /** The Themes row's ball always shows the theme that's ACTUALLY active, independent of [current]. */
+    /**
+     * The Themes row's ball always shows the Palette that's ACTUALLY active,
+     * independent of [current] AND of Mode (Dark/Light) — it depicts which
+     * marble/accent is selected, not which page you're on or which mode.
+     */
     private fun setThemeBall() {
-        val ballRes = when (ThemePrefs.get(activity)) {
-            ThemePrefs.Theme.DEFAULT -> R.drawable.shape_theme_ball_default
-            ThemePrefs.Theme.BLACK_WHITE -> R.drawable.shape_theme_ball_blackwhite
+        val ballRes = when (ThemePrefs.get(activity).palette) {
+            ThemePrefs.Palette.DEFAULT -> R.drawable.shape_theme_ball_default
+            ThemePrefs.Palette.BLACK_WHITE -> R.drawable.shape_theme_ball_blackwhite
         }
         activity.findViewById<View>(R.id.navThemeBall).setBackgroundResource(ballRes)
     }

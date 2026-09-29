@@ -34,4 +34,19 @@
 
     <color name="calo_bw_text_primary">#F5F5F5</color>
     <color name="calo_bw_text_secondary">#A0A0A0</color>
+
+    <!-- Default theme, Light mode (see themes.xml) — sampled from the 29 Sep 2026 Figma update -->
+    <color name="calo_default_light_bg">#C6BAAE</color>
+    <color name="calo_default_light_surface">#D9CFC5</color>
+    <color name="calo_default_light_ink">#B55E4D</color>
+    <color name="calo_default_light_ink_end">#C97A63</color>
+    <color name="calo_default_light_text_secondary">#8C7267</color>
+
+    <!-- BlackWhite theme, Light mode (see themes.xml) — sampled from the 29 Sep 2026 Figma update -->
+    <color name="calo_bw_light_bg">#C6C5C5</color>
+    <color name="calo_bw_light_surface">#D8D7D7</color>
+    <color name="calo_bw_light_ink">#141414</color>
+    <color name="calo_bw_light_ink_end">#2B2B2B</color>
+    <color name="calo_bw_light_button_bg">#F8F5F4</color>
+    <color name="calo_bw_light_text_secondary">#5C5A58</color>
 </resources>

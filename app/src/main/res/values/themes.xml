@@ -3,13 +3,22 @@
 
     <!--
       Theme.Calo is the manifest/launch default so the app never boots
-      without a valid theme — it's just an alias for Default. Every Activity
-      actually runs under whichever of the two concrete themes below
-      ThemePrefs picks at runtime (see ui/ThemePrefs.kt, ui/CaloBaseActivity.kt).
-    -->
-    <style name="Theme.Calo" parent="Theme.Calo.Default" />
+      without a valid theme — it's just an alias for Default/Dark. Every
+      Activity actually runs under whichever of the four concrete themes
+      below ThemePrefs picks at runtime, crossing a Palette (Default vs
+      BlackWhite — which marble/accent) with a Mode (Dark vs Light —
+      wired to the drawer's Dark Mode switch, 29 Sep 2026). See
+      ui/ThemePrefs.kt, ui/CaloBaseActivity.kt.
 
-    <style name="Theme.Calo.Default" parent="Theme.AppCompat.NoActionBar">
+      The marble drawables (marble_default.xml / marble_blackwhite.xml)
+      are NOT theme-attr-driven — they're picked directly by Palette in
+      Kotlin (MainActivity) and stay the same bright artwork in both Dark
+      and Light mode, matching the Figma mocks: only the page chrome
+      (background/surface/text/icons) changes with Mode, not the marble.
+    -->
+    <style name="Theme.Calo" parent="Theme.Calo.DefaultDark" />
+
+    <style name="Theme.Calo.DefaultDark" parent="Theme.AppCompat.NoActionBar">
         <item name="android:windowBackground">@color/calo_bg</item>
         <item name="android:statusBarColor">@color/calo_bg</item>
         <item name="android:navigationBarColor">@color/calo_bg</item>
@@ -25,9 +34,31 @@
         <item name="caloColorButtonText">@color/calo_button_text</item>
         <item name="caloColorTextPrimary">@color/calo_text_primary</item>
         <item name="caloColorTextSecondary">@color/calo_text_secondary</item>
+        <item name="caloColorDivider">#26FFFFFF</item>
+        <item name="caloColorRowSelected">#33FF6F52</item>
     </style>
 
-    <style name="Theme.Calo.BlackWhite" parent="Theme.AppCompat.NoActionBar">
+    <style name="Theme.Calo.DefaultLight" parent="Theme.AppCompat.NoActionBar">
+        <item name="android:windowBackground">@color/calo_default_light_bg</item>
+        <item name="android:statusBarColor">@color/calo_default_light_bg</item>
+        <item name="android:navigationBarColor">@color/calo_default_light_bg</item>
+        <item name="android:windowLightStatusBar" tools:targetApi="23">true</item>
+        <item name="colorPrimary">@color/calo_peach</item>
+        <item name="colorAccent">@color/calo_peach</item>
+
+        <item name="caloColorBackground">@color/calo_default_light_bg</item>
+        <item name="caloColorSurface">@color/calo_default_light_surface</item>
+        <item name="caloColorAccentStart">@color/calo_default_light_ink</item>
+        <item name="caloColorAccentEnd">@color/calo_default_light_ink_end</item>
+        <item name="caloColorButtonBg">@color/calo_peach</item>
+        <item name="caloColorButtonText">@color/calo_button_text</item>
+        <item name="caloColorTextPrimary">@color/calo_default_light_ink</item>
+        <item name="caloColorTextSecondary">@color/calo_default_light_text_secondary</item>
+        <item name="caloColorDivider">#33000000</item>
+        <item name="caloColorRowSelected">#33B55E4D</item>
+    </style>
+
+    <style name="Theme.Calo.BlackWhiteDark" parent="Theme.AppCompat.NoActionBar">
         <item name="android:windowBackground">@color/calo_bw_bg</item>
         <item name="android:statusBarColor">@color/calo_bw_bg</item>
         <item name="android:navigationBarColor">@color/calo_bw_bg</item>
@@ -43,6 +74,28 @@
         <item name="caloColorButtonText">@color/calo_bw_button_text</item>
         <item name="caloColorTextPrimary">@color/calo_bw_text_primary</item>
         <item name="caloColorTextSecondary">@color/calo_bw_text_secondary</item>
+        <item name="caloColorDivider">#26FFFFFF</item>
+        <item name="caloColorRowSelected">#33E8E8E8</item>
+    </style>
+
+    <style name="Theme.Calo.BlackWhiteLight" parent="Theme.AppCompat.NoActionBar">
+        <item name="android:windowBackground">@color/calo_bw_light_bg</item>
+        <item name="android:statusBarColor">@color/calo_bw_light_bg</item>
+        <item name="android:navigationBarColor">@color/calo_bw_light_bg</item>
+        <item name="android:windowLightStatusBar" tools:targetApi="23">true</item>
+        <item name="colorPrimary">@color/calo_bw_light_button_bg</item>
+        <item name="colorAccent">@color/calo_bw_light_button_bg</item>
+
+        <item name="caloColorBackground">@color/calo_bw_light_bg</item>
+        <item name="caloColorSurface">@color/calo_bw_light_surface</item>
+        <item name="caloColorAccentStart">@color/calo_bw_light_ink</item>
+        <item name="caloColorAccentEnd">@color/calo_bw_light_ink_end</item>
+        <item name="caloColorButtonBg">@color/calo_bw_light_button_bg</item>
+        <item name="caloColorButtonText">@color/calo_bw_light_ink</item>
+        <item name="caloColorTextPrimary">@color/calo_bw_light_ink</item>
+        <item name="caloColorTextSecondary">@color/calo_bw_light_text_secondary</item>
+        <item name="caloColorDivider">#33000000</item>
+        <item name="caloColorRowSelected">#33141414</item>
     </style>
 
     <!-- Nav drawer row pieces (view_nav_drawer.xml) -->
@@ -71,6 +124,19 @@
         <item name="android:layout_height">wrap_content</item>
         <item name="android:textColor">?attr/caloColorTextSecondary</item>
         <item name="android:textSize">15sp</item>
+    </style>
+
+    <!-- Settings screen's Accessibility/Microphone rows (activity_settings.xml) -->
+    <style name="SettingsPermissionRow">
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:background">?attr/selectableItemBackground</item>
+        <item name="android:clickable">true</item>
+        <item name="android:focusable">true</item>
+        <item name="android:gravity">center_vertical</item>
+        <item name="android:orientation">horizontal</item>
+        <item name="android:paddingTop">12dp</item>
+        <item name="android:paddingBottom">12dp</item>
     </style>
 
 </resources>

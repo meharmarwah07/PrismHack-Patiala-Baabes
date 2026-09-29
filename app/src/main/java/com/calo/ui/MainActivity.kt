@@ -8,7 +8,6 @@ import android.widget.EditText
 import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.TextView
-import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -44,16 +43,14 @@ import com.calo.teach.TeachRecorder
  * what DebugTriggerReceiver still drives — this is a second, independent
  * one for the real UI path.
  *
- * Menu opens the nav drawer (NavDrawerController); profile is still a
- * visible no-op — that destination has no mockup yet, and a silently dead
- * tap reads as a bug rather than an unbuilt screen.
+ * Menu opens the nav drawer (NavDrawerController); profile opens
+ * SettingsActivity, landing on its Account Details section.
  */
 class MainActivity : CaloBaseActivity() {
 
     private lateinit var orchestrator: CaloOrchestrator
     private lateinit var statusText: TextView
     private lateinit var teachButton: TextView
-    private lateinit var drawerLayout: DrawerLayout
     private var isTeaching = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -62,30 +59,33 @@ class MainActivity : CaloBaseActivity() {
 
         orchestrator = CaloOrchestrator(applicationContext)
 
-        drawerLayout = findViewById(R.id.drawerLayout)
+        val drawer = findViewById<DrawerLayout>(R.id.drawerLayout)
+        drawerLayout = drawer // base class needs this to close-not-exit on back press
         statusText = findViewById(R.id.statusText)
         teachButton = findViewById(R.id.teachButton)
 
         // No drawer item highlights here: the marble/home screen is reached
         // via the launcher icon, not a drawer item — Dashboard's own row
         // still navigates (to SavedWorkflowsActivity), it just isn't "this".
-        NavDrawerController(this, drawerLayout, current = null).setup()
+        NavDrawerController(this, drawer, current = null).setup()
 
         val marble = findViewById<android.view.View>(R.id.marble)
         marble.setBackgroundResource(
-            when (ThemePrefs.get(this)) {
-                ThemePrefs.Theme.DEFAULT -> R.drawable.marble_default
-                ThemePrefs.Theme.BLACK_WHITE -> R.drawable.marble_blackwhite
+            // Palette only — the marble artwork itself doesn't change between
+            // Dark and Light mode (see themes.xml's comment on this).
+            when (ThemePrefs.get(this).palette) {
+                ThemePrefs.Palette.DEFAULT -> R.drawable.marble_default
+                ThemePrefs.Palette.BLACK_WHITE -> R.drawable.marble_blackwhite
             }
         )
         marble.setOnClickListener { onMarbleTapped() }
         teachButton.setOnClickListener { onTeachButtonTapped() }
 
         findViewById<ImageButton>(R.id.menuButton).setOnClickListener {
-            drawerLayout.openDrawer(Gravity.START)
+            drawer.openDrawer(Gravity.START)
         }
         findViewById<ImageButton>(R.id.profileButton).setOnClickListener {
-            Toast.makeText(this, "Profile isn't built yet", Toast.LENGTH_SHORT).show()
+            SettingsActivity.start(this)
         }
     }
 

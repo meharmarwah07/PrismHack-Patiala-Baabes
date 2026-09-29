@@ -11,45 +11,45 @@ import androidx.drawerlayout.widget.DrawerLayout
 import com.calo.R
 
 /**
- * Picks between the two concrete themes (ThemePrefs.Theme) and applies the
- * choice app-wide. Tapping a card writes the preference immediately and
- * recreate()s this Activity so the picker itself re-skins too — every other
- * open Activity picks it up on its next onResume (see CaloBaseActivity).
+ * Picks between the two Palettes (ThemePrefs.Palette) and applies the
+ * choice app-wide — independent of Mode (Dark/Light), which the drawer's
+ * own Dark Mode switch controls (see NavDrawerController). Tapping a card
+ * writes the preference immediately and recreate()s this Activity so the
+ * picker itself re-skins too — every other open Activity picks it up on
+ * its next onResume (see CaloBaseActivity).
  */
 class ThemesActivity : CaloBaseActivity() {
-
-    private lateinit var drawerLayout: DrawerLayout
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_themes)
 
-        drawerLayout = findViewById(R.id.drawerLayout)
-        NavDrawerController(this, drawerLayout, NavDestination.THEMES).setup()
+        val drawer = findViewById<DrawerLayout>(R.id.drawerLayout)
+        drawerLayout = drawer // base class needs this to close-not-exit on back press
+        NavDrawerController(this, drawer, NavDestination.THEMES).setup()
 
         findViewById<ImageButton>(R.id.menuButton).setOnClickListener {
-            drawerLayout.openDrawer(Gravity.START)
+            drawer.openDrawer(Gravity.START)
         }
 
-        val current = ThemePrefs.get(this)
-        renderSelection(current)
+        renderSelection(ThemePrefs.get(this).palette)
 
         findViewById<View>(R.id.themeCardDefault).setOnClickListener {
-            selectTheme(ThemePrefs.Theme.DEFAULT)
+            selectPalette(ThemePrefs.Palette.DEFAULT)
         }
         findViewById<View>(R.id.themeCardBlackWhite).setOnClickListener {
-            selectTheme(ThemePrefs.Theme.BLACK_WHITE)
+            selectPalette(ThemePrefs.Palette.BLACK_WHITE)
         }
     }
 
-    private fun selectTheme(theme: ThemePrefs.Theme) {
-        if (theme == ThemePrefs.get(this)) return
-        ThemePrefs.set(this, theme)
+    private fun selectPalette(palette: ThemePrefs.Palette) {
+        if (palette == ThemePrefs.get(this).palette) return
+        ThemePrefs.setPalette(this, palette)
         recreate()
     }
 
-    private fun renderSelection(current: ThemePrefs.Theme) {
-        val defaultSelected = current == ThemePrefs.Theme.DEFAULT
+    private fun renderSelection(current: ThemePrefs.Palette) {
+        val defaultSelected = current == ThemePrefs.Palette.DEFAULT
         findViewById<View>(R.id.themeCardDefault).setBackgroundResource(
             if (defaultSelected) R.drawable.bg_theme_card_selected else R.drawable.bg_theme_card_unselected
         )
