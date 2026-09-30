@@ -21,6 +21,7 @@ import com.calo.domain.replay.StuckAnswerHandler
 import com.calo.domain.replay.StuckQuestion
 import com.calo.domain.semantic.RoleLabeler
 import com.calo.nlu.NLUClient
+import com.calo.nlu.OfflineFlowMatcher
 import com.calo.replay.ReplayEngine
 import com.calo.voice.TextToSpeechManager
 import com.calo.voice.VoiceInputManager
@@ -176,7 +177,14 @@ class CaloOrchestrator(context: Context) {
             // which does the missing-slot check itself (T14).
             when (match.status) {
                 MatchStatus.ERROR -> {
-                    onStatus(NLUClient.ERROR_MESSAGE)
+                    val offline = OfflineFlowMatcher.match(utterance, candidates)
+                    if (offline.status == MatchStatus.MATCHED) {
+                        android.util.Log.w("Calo", "NLU unavailable; using offline exact/keyword match: ${offline.matchedFlowId}")
+                        onStatus("Voice matching is offline — running the closest exact match.")
+                        proceedAsMatched(service, flows, candidates, offline, utterance, onStatus)
+                    } else {
+                        onStatus(NLUClient.ERROR_MESSAGE)
+                    }
                     return@launch
                 }
                 MatchStatus.NO_MATCH -> {
