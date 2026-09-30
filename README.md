@@ -1,4 +1,80 @@
-# Calo — build status (18 Sep 2026)
+# Calo — teach your phone a task once, say it again, and it does it
+
+**Samsung PRISM GenAI Hackathon · Theme 3 (Teachable Voice Automation)**
+Team: Patiala Babes · Thapar Institute of Engineering and Technology
+
+Calo learns a phone task by watching you do it once, then repeats it on
+voice command — in different words, with different details. There are no
+app integrations, no SDKs and no flows written by us: every flow comes from
+the user demonstrating it, live.
+
+## Submission contents
+
+| Item | Location |
+|---|---|
+| Demo video (4:08) | `submission/Calo-Demo.mp4` |
+| Installable APK | `submission/Calo-v1.0-debug.apk` |
+| Presentation | `submission/Calo-Samsung-PRISM-Theme3.pptx` |
+| AI disclosure | `submission/Calo-AI-Disclosure-PatialaBabes.docx` |
+| Architecture | [`ARCHITECTURE.md`](ARCHITECTURE.md) |
+| Known limitations | [`KNOWN_LIMITATIONS.md`](KNOWN_LIMITATIONS.md) |
+| Target apps | [`TARGET_APPS.md`](TARGET_APPS.md) |
+
+## Running the APK
+
+Install `submission/Calo-v1.0-debug.apk`, then enable **Calo** under
+Settings → Accessibility. No other setup is needed.
+
+> **Note on API keys.** The submitted debug APK has a Groq API key compiled
+> into `BuildConfig` so that it runs without configuration. This key exists
+> only for this submission and is revoked after judging. We are stating this
+> explicitly rather than leaving it to be discovered: a key shipped in an
+> APK is extractable, and in a production build it would be replaced by a
+> token issued per install from a server we control.
+
+## Building from source
+
+`local.properties` is not in the repository (it holds machine-specific
+paths and a secret). Create it at the repo root with:
+
+```properties
+sdk.dir=C:\\Users\\<you>\\AppData\\Local\\Android\\Sdk
+GROQ_API_KEY=<your Groq API key>
+```
+
+Then:
+
+```bash
+./gradlew :app:assembleDebug      # APK -> app/build/outputs/apk/debug/
+./gradlew test                    # 295 unit tests (279 domain, 16 app)
+```
+
+Without `GROQ_API_KEY` the app still builds and teaches flows; voice
+matching falls back to a deterministic offline matcher that handles exact
+and close-keyword commands but not paraphrases.
+
+## How it works, in one paragraph
+
+You press teach, say what you want, and do it once by hand. Calo's
+AccessibilityService records each tap as a *description* of the element —
+its id, visible text, content description, class, position among siblings,
+and the text of the surrounding row — never a coordinate, because
+coordinates break when the layout shifts. Each step is also labelled with
+what it *means* (open search, type a term, pick a result, add to cart).
+When you speak the command again, one LLM call (Groq,
+`openai/gpt-oss-20b`) matches the sentence against every flow you have
+taught and extracts any values that changed; everything after that is
+deterministic and needs no network at all. Before every single step, a
+rule-based gate inspects the screen and hands control back to you if it
+looks like a password, OTP or payment-entry screen.
+
+`ARCHITECTURE.md` has the detail, and `KNOWN_LIMITATIONS.md` documents
+what does not work and why — including the Jetpack Compose findings that
+cost us most of the final day.
+
+---
+
+## Development log — build status (18 Sep 2026 onward)
 
 Native Android/Kotlin, package `com.calo`. Theme 3, "Teachable Voice
 Automation." This README is the honest status report — what's real and
