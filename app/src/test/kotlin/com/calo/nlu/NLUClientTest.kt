@@ -23,7 +23,7 @@ class NLUClientTest {
 
     private lateinit var server: MockWebServer
     private val candidates = listOf(
-        CandidateFlow("flow-1", "order a margherita pizza", "Orders a pizza", listOf("item"), mapOf("item" to "Margherita"))
+        CandidateFlow("flow-1", "order a margherita pizza", "Orders a pizza", listOf("item"), slotExampleValues = mapOf("item" to "Margherita"))
     )
 
     @Before

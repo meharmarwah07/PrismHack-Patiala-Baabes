@@ -8,6 +8,11 @@
     <string name="profile_content_description">Profile</string>
     <string name="marble_content_description">Tap and speak a command</string>
     <string name="status_idle">Tap the marble and say what you want, or teach Calo something new.</string>
+    <string name="last_run_summary">Last run: %1$s — %2$s (%3$s)</string>
+    <string name="last_run_just_now">just now</string>
+    <string name="last_run_minutes_ago">%1$d min ago</string>
+    <string name="last_run_hours_ago">%1$d h ago</string>
+    <string name="last_run_days_ago">%1$d d ago</string>
     <string name="status_listening">Listening…</string>
     <string name="status_mic_permission_needed">Calo needs microphone access to hear voice commands.</string>
     <string name="status_teaching_active">Teaching — demonstrate the flow, then tap Finish Teaching.</string>

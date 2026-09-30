@@ -5,6 +5,7 @@ import android.content.Intent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.calo.accessibility.CaloAccessibilityService
 import com.calo.data.FlowRepository
+import com.calo.data.LastRunStore
 import com.calo.data.LearnedFlow
 import com.calo.domain.agent.AgentTaskBuilder
 import com.calo.domain.model.ElementAnchor
@@ -21,6 +22,7 @@ import com.calo.domain.replay.StuckAnswerHandler
 import com.calo.domain.replay.StuckQuestion
 import com.calo.domain.semantic.RoleLabeler
 import com.calo.nlu.NLUClient
+import com.calo.nlu.OfflineFlowMatcher
 import com.calo.replay.ReplayEngine
 import com.calo.voice.TextToSpeechManager
 import com.calo.voice.VoiceInputManager
@@ -52,20 +54,27 @@ class CaloOrchestrator(context: Context) {
 
         // Safety net added submission night (2026-09-30): ReplayEngine.replay
         // is a plain blocking call (Thread.sleep-based settle polling + raw
-        // AccessibilityNodeInfo tree walks) with NO per-step timeout of its
-        // own. STEP_TIMEOUT_MS/withStepTimeout exist only on ReplayPlanner
-        // (:domain) -- confirmed tonight that class is never constructed
-        // anywhere in the app, so it bounds nothing at runtime. Confirmed
-        // on-device: a node-tree walk right after "Screen still changing...
-        // continuing anyway" hung indefinitely -- zero further log output,
-        // no ANR (not a main-thread/system-level freeze, just a wedged
-        // background coroutine). This does NOT fix why the walk stalls
-        // (most likely: walking a tree Zomato is still actively re-rendering)
-        // -- it only guarantees a hang degrades to a spoken "stopped, not sure
-        // what happened" instead of hanging forever. Generous on purpose:
-        // observed legitimate multi-step runs (settle waits + CredentialGate
-        // walks) comfortably run past 30s.
-        const val REPLAY_WATCHDOG_MS = 90_000L
+        // AccessibilityNodeInfo tree walks). ReplayPlanner's per-step timeouts
+        // (STEP_TIMEOUT_MS/withStepTimeout, :domain) DO bound every step --
+        // ReplayPlanner is a Kotlin `object`, and ReplayEngine.replay() calls
+        // ReplayPlanner.replay(...) directly. What nothing bounds is the
+        // waitForStableScreen() call at the TOP of ReplayEngine.replay(), which
+        // runs BEFORE the planner is entered; that is the real reason this
+        // watchdog exists. Confirmed on-device: a node-tree walk right after
+        // "Screen still changing... continuing anyway" hung indefinitely -- zero
+        // further log output, no ANR (not a main-thread/system-level freeze,
+        // just a wedged background coroutine). This does NOT fix why the walk
+        // stalls (most likely: walking a tree Zomato is still actively
+        // re-rendering) -- it only guarantees a hang degrades to a spoken
+        // "stopped, not sure what happened" instead of hanging forever.
+        //
+        // 180s, up from 90s: the parallel domain lane is raising the per-step
+        // settle budget to 15s, so an 8-step flow can now legitimately spend
+        // 8 x 15s = 120s in settle waits alone, before tree walks and the
+        // initial waitForStableScreen(). A watchdog that fires on a healthy run
+        // produces a spoken "I don't know what happened" mid-demo -- strictly
+        // worse than waiting.
+        const val REPLAY_WATCHDOG_MS = 180_000L
 
         // Below this, the AI's pick is confirmed with the user before
         // anything is tapped. The parser reports 0.0 when the reply had no
@@ -98,6 +107,7 @@ class CaloOrchestrator(context: Context) {
     private val voice = VoiceInputManager(appContext)
     private val tts = TextToSpeechManager(appContext)
     private val repository = FlowRepository(appContext)
+    private val lastRunStore = LastRunStore(appContext)
     private val nluClient = NLUClient()
 
     private val job = SupervisorJob()
@@ -176,7 +186,14 @@ class CaloOrchestrator(context: Context) {
             // which does the missing-slot check itself (T14).
             when (match.status) {
                 MatchStatus.ERROR -> {
-                    onStatus(NLUClient.ERROR_MESSAGE)
+                    val offline = OfflineFlowMatcher.match(utterance, candidates)
+                    if (offline.status == MatchStatus.MATCHED) {
+                        android.util.Log.w("Calo", "NLU unavailable; using offline exact/keyword match: ${offline.matchedFlowId}")
+                        onStatus("Voice matching is offline — running the closest exact match.")
+                        proceedAsMatched(service, flows, candidates, offline, utterance, onStatus)
+                    } else {
+                        onStatus(NLUClient.ERROR_MESSAGE)
+                    }
                     return@launch
                 }
                 MatchStatus.NO_MATCH -> {
@@ -302,14 +319,26 @@ class CaloOrchestrator(context: Context) {
         onStatus: (String) -> Unit
     ) {
         val lower = answer.lowercase()
-        val chosen = options.find { opt ->
+        // Accept a tier's result only when it singles out exactly one option: two
+        // pizza flows both contain "pizza", and silently taking the first would be
+        // the wrong-guess T13 grades against. A tier that matches several options
+        // is ambiguous, so it does not fall through to the looser tier either.
+        val exactMatches = options.filter { opt ->
             lower.contains(opt.description.lowercase()) || lower.contains(opt.triggerUtterance.lowercase())
-        } ?: options.find { opt ->
-            opt.description.lowercase().split(" ").any { word -> word.length > 3 && lower.contains(word) }
         }
+        val chosen = exactMatches.singleOrNull()
+            ?: if (exactMatches.isEmpty()) {
+                options.filter { opt ->
+                    opt.description.lowercase().split(" ").any { word -> word.length > 3 && lower.contains(word) }
+                }.singleOrNull()
+            } else {
+                null
+            }
 
         if (chosen == null) {
-            onStatus("Still not sure which one you meant — try naming the app directly.")
+            val labels = options.map { appLabel(it.targetPackage) }
+            val names = if (labels.distinct().size == labels.size) labels else options.map { it.description }
+            onStatus("I still can't tell — say " + names.joinToString(" or ") { "'$it'" } + ".")
             return
         }
 
@@ -451,12 +480,24 @@ class CaloOrchestrator(context: Context) {
         targetPackage: String? = null,
         agentEligible: Boolean = true
     ) {
+        if (result is ReplayResult.Halted) {
+            // Credential-gate halt (T11): final, no retry/question/recovery path.
+            // Spoken sentence stays short and free of resourceIds; the technical
+            // detail goes to the UI status and logcat only.
+            android.util.Log.i("Calo", "Replay halted by credential gate at step ${result.atStepOrder}: ${result.reason}")
+            recordOutcome(flow, spokenCommand, result)
+            onStatus(describeResult(result))
+            tts.speak("This screen is asking for something private, so I'm stopping here and handing control back to you. Your turn — I won't tap anything on this screen.")
+            return
+        }
         if (result !is ReplayResult.Stuck) {
+            recordOutcome(flow, spokenCommand, result)
             onStatus(describeResult(result))
             return
         }
 
         if (result.actionMayHaveExecuted) {
+            recordOutcome(flow, spokenCommand, result)
             val message = "Stopped — the last action may not have completed cleanly, so I'm not retrying automatically."
             onStatus(message)
             tts.speak(message)
@@ -496,7 +537,10 @@ class CaloOrchestrator(context: Context) {
 
         val outcome = listenForStuckAnswer()
         when (val action = StuckAnswerHandler.handle(outcome, attempt)) {
-            StuckAction.Stop -> onStatus("Stopped.")
+            StuckAction.Stop -> {
+                recordOutcome(flow, spokenCommand, result)
+                onStatus("Stopped.")
+            }
             StuckAction.Repeat -> handleReplayResult(
                 engine, steps, slotValues, result, onStatus, attempt = attempt + 1, mode = mode,
                 flow = flow, spokenCommand = spokenCommand, targetPackage = targetPackage, agentEligible = false
@@ -519,8 +563,16 @@ class CaloOrchestrator(context: Context) {
                     engine, retrySteps, retrySlotValues, retryResult, onStatus, attempt = 1, mode = mode,
                     flow = flow, spokenCommand = spokenCommand, targetPackage = targetPackage, agentEligible = false
                 )
+                // No record() here: the nested call above records its own terminal
+                // outcome. Recording retryResult again would overwrite a later,
+                // correct outcome (e.g. a second voice retry that completed).
             }
         }
+    }
+
+    /** Persists the same string describeResult() shows/speaks, so "last run" can't disagree with it. */
+    private fun recordOutcome(flow: LearnedFlow?, spokenCommand: String?, result: ReplayResult) {
+        lastRunStore.record(flow?.description ?: spokenCommand.orEmpty(), describeResult(result))
     }
 
     private suspend fun listenForStuckAnswer(): StuckAnswerHandler.VoiceOutcome =

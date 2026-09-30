@@ -14,6 +14,7 @@ import androidx.core.content.ContextCompat
 import androidx.drawerlayout.widget.DrawerLayout
 import com.calo.R
 import com.calo.accessibility.CaloAccessibilityService
+import com.calo.data.LastRunStore
 import com.calo.domain.model.ActionType
 import com.calo.domain.model.FlowStep
 import com.calo.domain.model.SlotDefinition
@@ -164,6 +165,13 @@ class MainActivity : CaloBaseActivity() {
                 if (teachingNow) R.string.action_finish_teaching else R.string.action_start_teaching
             )
             if (teachingNow) statusText.text = getString(R.string.status_teaching_active)
+        }
+
+        // Only fill the idle placeholder -- never overwrite a live status
+        // (listening, teaching, a replay outcome) with an older summary.
+        val current = statusText.text?.toString().orEmpty()
+        if (!teachingNow && (current.isBlank() || current == getString(R.string.status_idle))) {
+            LastRunStore(this).lastRunSummary()?.let { statusText.text = it }
         }
     }
 
