@@ -54,20 +54,27 @@ class CaloOrchestrator(context: Context) {
 
         // Safety net added submission night (2026-09-30): ReplayEngine.replay
         // is a plain blocking call (Thread.sleep-based settle polling + raw
-        // AccessibilityNodeInfo tree walks) with NO per-step timeout of its
-        // own. STEP_TIMEOUT_MS/withStepTimeout exist only on ReplayPlanner
-        // (:domain) -- confirmed tonight that class is never constructed
-        // anywhere in the app, so it bounds nothing at runtime. Confirmed
-        // on-device: a node-tree walk right after "Screen still changing...
-        // continuing anyway" hung indefinitely -- zero further log output,
-        // no ANR (not a main-thread/system-level freeze, just a wedged
-        // background coroutine). This does NOT fix why the walk stalls
-        // (most likely: walking a tree Zomato is still actively re-rendering)
-        // -- it only guarantees a hang degrades to a spoken "stopped, not sure
-        // what happened" instead of hanging forever. Generous on purpose:
-        // observed legitimate multi-step runs (settle waits + CredentialGate
-        // walks) comfortably run past 30s.
-        const val REPLAY_WATCHDOG_MS = 90_000L
+        // AccessibilityNodeInfo tree walks). ReplayPlanner's per-step timeouts
+        // (STEP_TIMEOUT_MS/withStepTimeout, :domain) DO bound every step --
+        // ReplayPlanner is a Kotlin `object`, and ReplayEngine.replay() calls
+        // ReplayPlanner.replay(...) directly. What nothing bounds is the
+        // waitForStableScreen() call at the TOP of ReplayEngine.replay(), which
+        // runs BEFORE the planner is entered; that is the real reason this
+        // watchdog exists. Confirmed on-device: a node-tree walk right after
+        // "Screen still changing... continuing anyway" hung indefinitely -- zero
+        // further log output, no ANR (not a main-thread/system-level freeze,
+        // just a wedged background coroutine). This does NOT fix why the walk
+        // stalls (most likely: walking a tree Zomato is still actively
+        // re-rendering) -- it only guarantees a hang degrades to a spoken
+        // "stopped, not sure what happened" instead of hanging forever.
+        //
+        // 180s, up from 90s: the parallel domain lane is raising the per-step
+        // settle budget to 15s, so an 8-step flow can now legitimately spend
+        // 8 x 15s = 120s in settle waits alone, before tree walks and the
+        // initial waitForStableScreen(). A watchdog that fires on a healthy run
+        // produces a spoken "I don't know what happened" mid-demo -- strictly
+        // worse than waiting.
+        const val REPLAY_WATCHDOG_MS = 180_000L
 
         // Below this, the AI's pick is confirmed with the user before
         // anything is tapped. The parser reports 0.0 when the reply had no
