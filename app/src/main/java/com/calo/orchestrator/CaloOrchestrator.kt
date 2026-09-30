@@ -310,14 +310,26 @@ class CaloOrchestrator(context: Context) {
         onStatus: (String) -> Unit
     ) {
         val lower = answer.lowercase()
-        val chosen = options.find { opt ->
+        // Accept a tier's result only when it singles out exactly one option: two
+        // pizza flows both contain "pizza", and silently taking the first would be
+        // the wrong-guess T13 grades against. A tier that matches several options
+        // is ambiguous, so it does not fall through to the looser tier either.
+        val exactMatches = options.filter { opt ->
             lower.contains(opt.description.lowercase()) || lower.contains(opt.triggerUtterance.lowercase())
-        } ?: options.find { opt ->
-            opt.description.lowercase().split(" ").any { word -> word.length > 3 && lower.contains(word) }
         }
+        val chosen = exactMatches.singleOrNull()
+            ?: if (exactMatches.isEmpty()) {
+                options.filter { opt ->
+                    opt.description.lowercase().split(" ").any { word -> word.length > 3 && lower.contains(word) }
+                }.singleOrNull()
+            } else {
+                null
+            }
 
         if (chosen == null) {
-            onStatus("Still not sure which one you meant — try naming the app directly.")
+            val labels = options.map { appLabel(it.targetPackage) }
+            val names = if (labels.distinct().size == labels.size) labels else options.map { it.description }
+            onStatus("I still can't tell — say " + names.joinToString(" or ") { "'$it'" } + ".")
             return
         }
 
