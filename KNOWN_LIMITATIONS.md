@@ -1,4 +1,138 @@
-# Calo — known limitations (23 Sep 2026, updated 25 Sep 2026, updated 28 Sep 2026 x2)
+# Calo — known limitations (23 Sep 2026, updated 25 Sep 2026, updated 28 Sep 2026 x2, updated 30 Sep 2026)
+
+## 30 Sep 2026 — Jetpack Compose surfaces are only partially reachable
+
+Everything in this section was found on-device against the real Zomato app
+on submission day, with `uiautomator dump` and replay logs as evidence.
+Zomato's search-results screen is Compose-rendered, and Compose exposes a
+much thinner accessibility surface than a View-based screen. Four distinct
+consequences, all of which we now handle — none of which we consider
+solved.
+
+### Result cards accept ACTION_CLICK and ignore it
+A Compose result card is an `android.view.View` with no resource id, marked
+`clickable="true"`. `performAction(ACTION_CLICK)` on it returns **true**
+while the app does nothing: Compose handles the tap in its own gesture
+code, and Android's accessibility layer reports only that the action was
+*dispatched*, never that it took effect. Replay then continued against a
+screen that had not changed.
+**What we do:** for a node of that shape (`resourceId == null`,
+`className == android.view.View`) `ReplayEngine.performClick` dispatches a
+real touch gesture *instead of* `ACTION_CLICK`, so exactly one input
+reaches the app and there is no double-fire risk.
+
+### Tapping the climbed ancestor's centre can miss the element
+`NodeWalker` matches a label (a `TextView`) and climbs to its nearest
+clickable ancestor. That ancestor can be larger than the card, so its
+centre is not on the card: measured on-device, the gesture landed at
+**(540,405)** while the card spans `[36,417][1044,711]` — twelve pixels
+above it, in the gap. Four separate "make the tap more realistic" changes
+failed for this reason before the coordinates were printed.
+**What we do:** `ResolvedMatch` now carries `matchedBounds`, the originally
+matched element's rectangle captured *before* the climb, and the gesture
+targets that — the visible label, exactly where a person taps.
+
+### Click events are dispatched on the window root
+During teaching, Compose screens fire `TYPE_VIEW_CLICKED` with
+`event.source` set to the fragment root (`…:id/root`), which spans the
+whole window. Recording that verbatim produced anchors that match the
+entire screen — that is, nothing — and replay blind-tapped the screen
+centre (always 540,1206).
+**What we do:** a source covering ≥90% of the window is treated as no
+source at all and routed through the existing label-based recovery;
+at replay, an anchor resolving to the whole window is refused, and a CLICK
+step with no role, no slot and no readable label is skipped rather than
+guessed at.
+
+### Teach-time capture is not deterministic
+`recordClickWithoutSource` needs a cached screen from the target package
+captured within 2000ms to resolve a null-source click. When two taps are
+far apart, or intervening scrolls are filtered as noise, the cache goes
+stale and the second tap is **dropped, fail-closed**. Observed directly:
+identical teaching gestures produced a 2-tap recording (which replays
+correctly) and a 1-tap recording (which does not).
+**Not fixed.** Teaching currently depends on pacing — roughly two seconds
+between taps, without scrolling in between. `docs/pre-demo-checklist.md`
+covers this. A durable fix would extend the raw-touch capture path to
+cover the case rather than relying on the cached-screen window.
+
+## 30 Sep 2026 — the credential gate costs app coverage (accepted trade)
+
+`CredentialGateRules.classify()` runs before every replay step, and blocks
+on payment/OTP/login wording. It is two-tier: strong signals (a password
+field, "card number", "cvv", "upi pin", "add new card", …) block on a
+single hit; weak signals ("pay", "upi", "wallet", "payment", …) need two
+or more distinct matches, are matched on word boundaries, and are searched
+only in on-screen text — never in resource ids or class names.
+
+That design was itself a fix: the earlier version matched `"pay"` and
+`"place order"` as bare substrings across text, ids *and* class names,
+which blocked on the **cart** screen — the screen a flow must act on to
+reach payment at all — and would have failed T2 while adding nothing to
+T11.
+
+The remaining cost is app coverage. **Amazon's home screen advertises
+"Amazon Pay"**, which is enough to halt replay at step 1. The gate is
+behaving exactly as specified; the specification is blunt. A screen that
+merely *links* to payment is not a screen that *collects* payment details,
+and we do not currently distinguish the two.
+
+**Why we did not fix it on submission day:** T11 is worth 5 points and
+carries a **−10** penalty for failure, a 15-point swing. Loosening the gate
+to admit Amazon's home screen would have been an untested change to the
+one component whose failure mode is worst. Refusing an app is recoverable;
+tapping a real payment button is not.
+
+**The right fix**, for after this cycle: classify by what a screen
+*collects* rather than what it mentions — an editable field whose hint or
+label names a card, CVV, UPI PIN or OTP, or `isPassword`, blocks; a
+navigational affordance ("Amazon Pay", "Proceed to Pay", "Place Order")
+does not, because the screen it leads to will block on its own terms.
+
+
+## 30 Sep 2026 — two fields, one resource id
+
+Zomato gives the global search bar and a restaurant's menu-search field the
+same resource id (`…:id/edittext`), distinguished only by `indexInParent`
+(0 vs 1). `NodeWalker.resolve`'s resourceId tier matched on the id alone and
+discarded the index, so both matched and the first in traversal order won —
+replay typed the item into the search box it had already used.
+**What we do:** the resourceId tier consults `indexInParent` first and falls
+back to id-only when the indexed lookup finds nothing, so it can only narrow
+an ambiguous match, never lose one. Note that `indexInParent` is
+*structural*, not semantic: a dynamic hierarchy can renumber it between
+teaching and replay. The fallback is deliberate — it keeps a stale index
+from turning into a spurious `Stuck` — but it means a stale index degrades
+to the old ambiguous behaviour rather than failing loudly.
+
+## 30 Sep 2026 — Swiggy is not a supported target
+
+We evaluated Swiggy as an alternative food-ordering target. Its results
+screen exposes **zero actionable elements** to the accessibility tree
+(`Semantic snapshot: 0 actionable elements`), and a teaching session there
+recorded four steps with no `OPEN_SEARCH`, `SEARCH_INPUT` or
+`SUBMIT_SEARCH` role at all — the search interaction was never visible to
+us. Swiggy is therefore **not** declared as a target app.
+
+## 30 Sep 2026 — replay-side duplicate-CLICK guard removed
+
+`ReplayPlanner` previously skipped a CLICK whose anchor matched the
+immediately preceding step, on the assumption that one taught tap is always
+exactly one `FlowStep`. That assumption is false: Zomato's search flow
+requires two genuine taps on elements that both read "Domino's Pizza" (the
+autocomplete suggestion, then the restaurant card), and the guard silently
+dropped the second. `FlowStep` carries no timestamp, so the guard could
+never distinguish "same tap captured twice" from "user genuinely tapped
+twice" — it was structurally incapable of being correct. The artifact case
+it existed for is handled at the source, at teach time, by
+`TapDedup.isSameTap` and `TouchClaim.canClaim`, which do have timestamps.
+
+**Test debt this created:** six unit tests across `ReplayPlannerTest` and
+`SemanticReplayTest` asserted the removed behaviour and are marked
+`@Ignore` with an explanatory message rather than rewritten. They should be
+rewritten or deleted; they are listed here rather than left for a reader to
+discover.
+
 
 ## 28 Sep 2026 — a timed-out action step is not guaranteed cancelled
 

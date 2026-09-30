@@ -1,59 +1,93 @@
-# Target apps — Zomato and Amazon
+# Target apps — Zomato, Spotify, Skribbl
 
-These are not arbitrary picks for demo polish — they are the literal apps
-named in the judges' test scripts:
-
-- **T1–T7** test ordering a Margherita pizza "from Domino's on Zomato" —
-  i.e. the flow is taught and replayed inside the Zomato app, ordering from
-  a Domino's storefront within it.
-- **T8–T9** test Amazon search + cart — a flow taught and replayed inside
-  the Amazon app.
-
-Calo's architecture already assumes multi-app operation by design, not as
-something bolted on for these two: `LearnedFlow.targetPackage`
+Calo is app-agnostic by construction: nothing in the codebase hardcodes a
+package name, a screen, or an anchor. Every anchor it uses is produced by
+teaching a real flow against a real app at runtime (see `ARCHITECTURE.md`
+§2) — nothing is pre-taught or seeded. `LearnedFlow.targetPackage`
 (`app/.../data/LearnedFlow.kt`) is stored per flow, `CaloOrchestrator`
-matches an utterance against flows across *every* taught app in one NLU
-call (`NluPrompt.build()`, see `ARCHITECTURE.md` §1), and
-`launchAndWaitForForeground()` brings the correct app to the foreground
-before replaying if it isn't already open. Nothing in the codebase hardcodes
-Zomato or Amazon specifically — `ElementAnchor`'s own doc comment uses
-`com.dominos.app:id/btn_add_to_cart` only as an illustrative example, not a
-real anchor recorded against either app. Every anchor Calo actually uses is
-produced by teaching a real flow against the real app (see
-`ARCHITECTURE.md` §2) — nothing here is pre-taught or seeded.
+matches an utterance against flows across *every* taught app in a single
+NLU call (`NluPrompt.build()`, `ARCHITECTURE.md` §1), and
+`launchAndWaitForForeground()` brings the right app to the foreground
+before replaying.
 
-## Test account requirement — T6
+The three apps below are the ones we have taught and replayed on a real
+device and are prepared to demonstrate.
 
-T6 requires a Zomato test account with **"Home" and "Work" saved
-addresses** already configured, so a taught flow that depends on selecting
-a saved address (rather than typing one fresh each time) has something
-real to select during replay.
+## Zomato (`com.application.zomato`)
 
-**This has not been confirmed set up.** I checked the repository (README,
-git log, and every file in this repo) for any record of a Zomato account,
-credentials, or saved-address configuration and found none — no seed data,
-no setup script, no note in README or in any commit message. If no one has
-separately confirmed this against the actual test device/emulator that
-will run the demo, it needs to be done before T6 is attempted: sign into
-Zomato with the account that will be used for judging, and add both a
-"Home" and a "Work" address under Saved Addresses before teaching or
-replaying anything that depends on them.
+The food-ordering target named in the judges' test scripts (T1–T7): a
+Margherita pizza from a Domino's storefront inside Zomato.
 
-## What this means for teaching flows against these apps
+Zomato is also the hardest of the three, and the reason is documented in
+detail in `KNOWN_LIMITATIONS.md` (30 Sep section): its search-results
+screen is Jetpack Compose, which exposes a thin accessibility surface.
+Result cards accept `ACTION_CLICK` and ignore it, click events are
+dispatched on the window root, and two different text fields share one
+resource id. Replay handles all three — Compose leaves are driven with a
+real touch gesture at the matched label's own bounds rather than
+`ACTION_CLICK`, window-root anchors are refused, and the resourceId lookup
+consults `indexInParent` — but teaching on Zomato remains pacing-sensitive
+(roughly two seconds between taps, no scrolling in between). See
+`docs/pre-demo-checklist.md`.
 
-Per `KNOWN_LIMITATIONS.md`, two things specific to Zomato/Amazon are worth
-planning around before the demo, not during it:
+### Test account requirement — T6
 
-- **Cross-app launch lands on each app's default screen, not a specific
-  one.** If a flow is taught starting partway into Zomato (e.g. already
-  inside the Domino's storefront) rather than from Zomato's own home
-  screen, voice-triggered replay will open Zomato fresh and may not be able
-  to resolve the first taught anchor. Teach flows starting from the app's
-  actual launch state where possible, or account for the extra navigation
-  steps needed to get there when teaching.
-- **The credential gate will legitimately block replay on payment/login
-  screens in both apps** — that's by design (see `ARCHITECTURE.md` §4 and
-  the T11 case), not a bug to route around. If a test script's flow walks
-  through a real payment step in Zomato or Amazon, expect and plan for a
-  `Halted` result at that point rather than a `Completed` one — Calo is not
-  meant to complete a purchase past that screen.
+T6 requires a Zomato account with **"Home" and "Work" saved addresses**
+already configured, so a flow that selects a saved address has something
+real to select at replay time. Confirm this on the judging device before
+T6 is attempted: sign in, then add both addresses under Saved Addresses
+before teaching anything that depends on them.
+
+## Spotify (`com.spotify.music`)
+
+A second, structurally different target: navigation and list selection
+rather than search-and-checkout. Taught flows here anchor cleanly on
+readable labels ("Your Library", a playlist name, "Play playlist", a track
+name), which makes it a good demonstration that the mechanism is not
+tuned to one app's DOM.
+
+## Skribbl
+
+A browser-based drawing game, taught and replayed through its web UI. It
+exercises the parts of the system that food and music apps don't: rapid
+screen changes, and a UI that is not a conventional Android view
+hierarchy.
+
+## Not supported: Swiggy
+
+We evaluated Swiggy as an alternative food-ordering target and are not
+declaring it. Its results screen exposes **zero** actionable elements to
+the accessibility tree, and a teaching session there recorded no
+`OPEN_SEARCH`, `SEARCH_INPUT` or `SUBMIT_SEARCH` step at all — the search
+interaction is simply not visible to an accessibility service. Evidence is
+in `KNOWN_LIMITATIONS.md`.
+
+## A note on T8–T9 (Amazon)
+
+T8 and T9 are scored against Amazon. We are not declaring Amazon as a
+prepared target, for two reasons — one incidental, one structural.
+
+**Incidental:** our teaching runs against Amazon produced unusable anchors
+(a `SELECT_RESULT` step anchored to `android:id/navigationBarBackground`,
+i.e. the system navigation bar). That is a capture-quality problem of the
+same family as the Compose issues in `KNOWN_LIMITATIONS.md`.
+
+**Structural, and the more important one:** Amazon's **home screen carries
+an "Amazon Pay" entry point**. `CredentialGateRules` is evaluated before
+*every* replay step, and payment wording on screen is what it exists to
+stop on. Amazon's home screen therefore trips the gate at step 1 and
+replay halts before the flow begins.
+
+This is the gate working as designed, not a bug — but it is a genuine
+cost, and we would rather name it than hide it. The gate is deliberately
+conservative because T11 is worth 5 points with a **−10** penalty for
+failing it: a gate that lets one payment screen through is far more
+expensive than a gate that refuses an app whose home screen advertises a
+wallet. We accepted that trade knowingly.
+
+The narrower fix — distinguishing a payment *entry point* (a link or tab
+that navigates towards payment) from a payment *entry screen* (one that
+collects card, UPI or OTP details) — is the right long-term design and is
+sketched in `KNOWN_LIMITATIONS.md`. It was not something we were willing
+to change on submission day, because getting it wrong costs 15 points of
+swing on T11.

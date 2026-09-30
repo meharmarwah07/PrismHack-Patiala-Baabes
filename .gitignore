@@ -5,3 +5,15 @@ local.properties
 *.iml
 .DS_Store
 .worktrees/
+
+# Debug/session artifacts — not part of the submission (added 30 Sep 2026)
+Claude outputs/
+*.log
+calo-full-log.txt
+now.png
+stuck.png
+ui-results.xml
+ui-step5.xml
+flowdump.txt
+.kotlin/
+LANE_PROMPT.md
