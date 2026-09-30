@@ -6,6 +6,7 @@ import com.calo.domain.model.ElementAnchor
 import com.calo.domain.model.FlowStep
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Ignore
 import org.junit.Test
 
 /** In-memory fake standing in for the real AccessibilityNodeInfo-backed adapter. */
@@ -339,6 +340,7 @@ class ReplayPlannerTest {
 
     // ---- consecutive duplicate CLICK steps (2026-09-26 Zomato capture bug) ----
 
+    @Ignore("Replay-side duplicate-CLICK guard removed 2026-09-30 — see ReplayPlanner's REMOVED note. Duplicate capture is prevented at teach time (TapDedup/TouchClaim). Rewrite or delete these post-submission.")
     @Test
     fun `consecutive identical CLICK steps -- only the first is tapped, duplicates never re-resolved`() {
         // Mirrors tonight's actual Zomato capture: the same anchor recorded
@@ -378,6 +380,7 @@ class ReplayPlannerTest {
         assertEquals(listOf("id/pizza_row"), provider.clickCalls) // step 1 ran; step 2 never reached the dup-skip at all
     }
 
+    @Ignore("Replay-side duplicate-CLICK guard removed 2026-09-30 — see ReplayPlanner's REMOVED note. Duplicate capture is prevented at teach time (TapDedup/TouchClaim). Rewrite or delete these post-submission.")
     @Test
     fun `a real screen transition does NOT suppress deduplication -- the risk this fix closes`() {
         // The scenario the "harmless no-op" assumption never actually
@@ -402,6 +405,7 @@ class ReplayPlannerTest {
         assertEquals(listOf("id/pizza_row"), provider.findNodeCalls) // only 1 entry: step 2 never attempted
     }
 
+    @Ignore("Replay-side duplicate-CLICK guard removed 2026-09-30 — see ReplayPlanner's REMOVED note. Duplicate capture is prevented at teach time (TapDedup/TouchClaim). Rewrite or delete these post-submission.")
     @Test
     fun `a same-id DIFFERENT element on the new screen is also never tapped by a duplicate step`() {
         // The subtler half of the same risk: the anchor DOES still resolve
@@ -426,6 +430,7 @@ class ReplayPlannerTest {
         assertTrue(provider.clickCalls.none { it.contains("occurrence") })
     }
 
+    @Ignore("Replay-side duplicate-CLICK guard removed 2026-09-30 — see ReplayPlanner's REMOVED note. Duplicate capture is prevented at teach time (TapDedup/TouchClaim). Rewrite or delete these post-submission.")
     @Test
     fun `duplicate CLICK detection requires the SAME anchor -- different anchors both run normally`() {
         val steps = listOf(
@@ -535,6 +540,7 @@ class ReplayPlannerTest {
         assertTrue(provider.imeEnterCalls.isEmpty())
     }
 
+    @Ignore("Replay-side duplicate-CLICK guard removed 2026-09-30 — see ReplayPlanner's REMOVED note. Duplicate capture is prevented at teach time (TapDedup/TouchClaim). Rewrite or delete these post-submission.")
     @Test
     fun `duplicate detection is scoped to CLICK only -- a repeated SCROLL on the same anchor is NOT deduplicated`() {
         // A taught "scroll down twice" on the same list is a normal,

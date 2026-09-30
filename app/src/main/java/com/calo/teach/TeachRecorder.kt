@@ -259,7 +259,29 @@ class TeachRecorder(
             }
         }
 
-        val source = event.source
+        // 2026-09-30, confirmed from a real uiautomator dump + replay log:
+        // Zomato's Compose screens dispatch TYPE_VIEW_CLICKED with
+        // event.source set to the FRAGMENT ROOT container
+        // ("com.application.zomato:id/root", spanning the whole window)
+        // rather than the element the finger actually hit. Recording that
+        // verbatim produced steps whose anchor matches the entire screen —
+        // i.e. nothing — and replay then blind-tapped the screen centre.
+        // A source that covers the whole window is no more useful than no
+        // source at all, so route it through the SAME recovery path
+        // (recordClickWithoutSource), which re-finds the element by the text
+        // the event itself carries against a cached pre-click screen.
+        val rawSource = event.source
+        val source = if (
+            rawSource != null &&
+            event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED &&
+            coversWholeWindow(rawSource, currentRoot)
+        ) {
+            Log.w(TAG, "CLICK event.source covers the whole window (${rawSource.viewIdResourceName}) — treating as sourceless and recovering by label")
+            rawSource.recycle()
+            null
+        } else {
+            rawSource
+        }
         if (source == null) {
             // Confirmed on a real device (2026-09-23): AccessibilityEvent
             // .source is reliably null — not the occasional flake it was
@@ -1091,6 +1113,23 @@ class TeachRecorder(
         // A real CLICK was recorded for this tap: the raw-touch fallback isn't needed.
         pendingRawTouch = null
         steps += step
+    }
+
+    /**
+     * True when [node] spans (nearly) all of [root] — the window/fragment
+     * root rather than a real target. See the TYPE_VIEW_CLICKED handling
+     * above for why a source like that is treated as no source at all.
+     */
+    private fun coversWholeWindow(node: AccessibilityNodeInfo, root: AccessibilityNodeInfo?): Boolean {
+        if (root == null) return false
+        val nodeBounds = android.graphics.Rect()
+        val rootBounds = android.graphics.Rect()
+        node.getBoundsInScreen(nodeBounds)
+        root.getBoundsInScreen(rootBounds)
+        if (nodeBounds.isEmpty || rootBounds.isEmpty) return false
+        val nodeArea = nodeBounds.width().toLong() * nodeBounds.height().toLong()
+        val rootArea = rootBounds.width().toLong() * rootBounds.height().toLong()
+        return nodeArea >= rootArea * 9 / 10
     }
 
     fun currentSteps(): List<FlowStep> = ForeignScrollFilter.filter(steps.toList(), targetPackage)

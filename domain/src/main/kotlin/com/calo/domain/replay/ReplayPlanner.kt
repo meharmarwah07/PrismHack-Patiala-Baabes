@@ -197,7 +197,23 @@ object ReplayPlanner {
     private const val TAUGHT_RESULT_SCROLL_AFTER_POLLS = 4
     private const val TAUGHT_RESULT_MAX_SCROLLS = 4
     private const val FIND_RETRY_INTERVAL_MS = 250L
-    private const val FIND_RETRY_WINDOW_MS = 1_500L
+
+    // Raised 1_500 -> 6_000 on 2026-09-30. There is no "page loaded" signal in
+    // the accessibility API, so the only honest precondition for a step is
+    // "the element this step needs is now on screen" -- which is exactly what
+    // this retry window waits for. That is strictly better than a blanket
+    // sleep: a fast screen costs nothing extra (the first lookup hits and
+    // returns immediately), while a slow one waits precisely as long as it
+    // needs to. 1.5s was far too short against Zomato, whose screens fill in
+    // over several seconds, so steps reported Stuck while their element was
+    // still on its way.
+    private const val FIND_RETRY_WINDOW_MS = 6_000L
+
+    // findNode/findNodeByValue therefore need more than STEP_TIMEOUT_MS (5s)
+    // or the outer bound would fire before the retry window is even spent.
+    // 10s leaves headroom over the 6s window for the lookups themselves,
+    // which are full tree walks on a complex screen.
+    private const val FIND_TIMEOUT_MS = 10_000L
 
     private fun findNodeWithRetry(provider: NodeProvider, anchor: ElementAnchor): NodeHandle? {
         val deadline = System.currentTimeMillis() + FIND_RETRY_WINDOW_MS
@@ -239,35 +255,14 @@ object ReplayPlanner {
             ?.let { SlotResolver.resolveValue(it, slotValues) }
 
         return try {
-            var previousStep: FlowStep? = null
             for ((i, step) in plan.withIndex()) {
                 // Gate check happens first, before resolving or touching any
                 // node for this step — a Blocked verdict means this step (and
-                // everything after it) is never attempted. Unconditional, even
-                // for a step about to be skipped as a duplicate below: the
-                // "checked before EVERY step, no exceptions" guarantee must not
-                // grow a silent gap for skipped steps.
+                // everything after it) is never attempted.
                 gateCheck(step, provider)?.let { return it }
-
-                if (isDuplicateCapture(step, previousStep)) {
-                    // Teaching sometimes records one physical tap twice (a real
-                    // CLICK event and the raw-touch fallback both committing —
-                    // seen on-device in Zomato, 27 Sep). Checked BEFORE calling
-                    // runStep, not after a failed resolve: the same resourceId/
-                    // text can legitimately resolve to a DIFFERENT real element
-                    // once the screen has moved on (a generic id/label reused
-                    // across screens), so a duplicate step must never even
-                    // attempt to resolve — only "never touched" is actually
-                    // safe, not "touched but happened to fail" (2026-09-26,
-                    // on-device; this exact risk is why isDuplicateClick was
-                    // moved ahead of resolution in the first place).
-                    previousStep = step
-                    continue
-                }
 
                 val result = runStep(step, plan.getOrNull(i + 1), slotValues, query, provider, mode)
                 result?.let { return it }
-                previousStep = step
             }
             ReplayResult.Completed
         } catch (e: StepTimeoutException) {
@@ -335,7 +330,23 @@ object ReplayPlanner {
                     withStepTimeout(step.order, "nodeForElement") { provider.nodeForElement(it.element) }
                 } ?: return ReplayResult.Stuck(step.order, "couldn't submit the search")
             }
-            is Target.Missing -> return ReplayResult.Stuck(step.order, target.reason)
+            is Target.Missing -> {
+                if (isUninformative(step)) {
+                    // A CLICK step with no role and no readable label, whose
+                    // anchor can't be found, carries no information about what
+                    // the user actually tapped — confirmed on-device
+                    // (2026-09-30): such steps came from taps that failed to
+                    // anchor at teach time and recorded the window root, and
+                    // acting on one only knocked the flow off course. Skipping
+                    // is the only option that lets the rest of the flow run;
+                    // stopping here would fail a run whose remaining steps are
+                    // perfectly good. A step with a role or a readable label is
+                    // NEVER skipped — that one genuinely went missing, and
+                    // Stuck (which asks the user) stays the right answer.
+                    return null
+                }
+                return ReplayResult.Stuck(step.order, target.reason)
+            }
             is Target.Unsure -> return ReplayResult.Stuck(step.order, "not sure what to tap: ${target.reason} — please do this step yourself")
         }
 
@@ -388,6 +399,19 @@ object ReplayPlanner {
         return null
     }
 
+    /**
+     * A CLICK step Calo can't say anything meaningful about: no recognised
+     * role, and an anchor with no text and no contentDescription — nothing a
+     * person could read to identify what was tapped. Only ever consulted when
+     * the anchor has ALREADY failed to resolve.
+     */
+    private fun isUninformative(step: FlowStep): Boolean =
+        step.action == ActionType.CLICK &&
+            step.role == null &&
+            step.slotName == null &&
+            step.target.text.isNullOrBlank() &&
+            step.target.contentDescription.isNullOrBlank()
+
     private sealed class Target {
         data class Found(val node: NodeHandle) : Target()
         data object AlreadySatisfied : Target()
@@ -411,7 +435,7 @@ object ReplayPlanner {
             // generalizing, so this searches by the new value instead.
             val searchValue = SlotResolver.resolveClickTarget(step, slotValues)
             if (searchValue != null) {
-                return withStepTimeout(step.order, "findNodeByValue") { findNodeByValueWithRetry(provider, searchValue) }
+                return withStepTimeout(step.order, "findNodeByValue", timeoutMs = FIND_TIMEOUT_MS) { findNodeByValueWithRetry(provider, searchValue) }
                     ?.let { Target.Found(it) }
                     ?: Target.Missing("couldn't find an option matching '$searchValue'")
             }
@@ -420,7 +444,7 @@ object ReplayPlanner {
         val notFound = "element not found: ${step.target}"
         return when (mode) {
             ReplayMode.EXACT -> {
-                withStepTimeout(step.order, "findNode") { findNodeWithRetry(provider, step.target) }
+                withStepTimeout(step.order, "findNode", timeoutMs = FIND_TIMEOUT_MS) { findNodeWithRetry(provider, step.target) }
                     ?.let { return Target.Found(it) }
                 val role = step.role ?: return Target.Missing(notFound)
                 locateByRole(role, step, slotValues, query, provider, waitForTaughtResult = true)
@@ -440,7 +464,7 @@ object ReplayPlanner {
                     if (readable.text == null && readable.contentDescription == null) {
                         Target.Missing(notFound)
                     } else {
-                        withStepTimeout(step.order, "findNode") { findNodeWithRetry(provider, readable) }
+                        withStepTimeout(step.order, "findNode", timeoutMs = FIND_TIMEOUT_MS) { findNodeWithRetry(provider, readable) }
                             ?.let { Target.Found(it) } ?: Target.Missing(notFound)
                     }
                 }
@@ -525,26 +549,22 @@ object ReplayPlanner {
         return true
     }
 
-    // Compares identity fields only (the ones NodeWalker's resolver actually
-    // searches by — see ElementAnchor's own doc) — not the full ElementAnchor
-    // equality. contextLabel is captured live from surrounding screen text at
-    // each tap (see ContextPicker) and hintText is documented as "not used to
-    // re-find the element"; both can legitimately differ between two taps on
-    // the SAME element captured moments apart during a UI transition (e.g. a
-    // search bar mid-open), which silently defeated this check for exactly
-    // the capture-artifact case it exists to catch (2026-09-28, on-device —
-    // confirmed the full-anchor-equality version this replaces missed it).
-    // slotName == null: a slot-driven CLICK's real target can legitimately
-    // differ from its taught anchor (see locate()'s searchValue branch
-    // above), so two consecutive slot steps sharing a literal taught anchor
-    // are not the same "capture artifact" this exists to catch.
-    private fun isDuplicateCapture(step: FlowStep, previous: FlowStep?): Boolean =
-        step.action == ActionType.CLICK &&
-            previous?.action == ActionType.CLICK &&
-            step.slotName == null &&
-            previous.target.resourceId == step.target.resourceId &&
-            previous.target.text == step.target.text &&
-            previous.target.contentDescription == step.target.contentDescription &&
-            previous.target.className == step.target.className &&
-            previous.target.indexInParent == step.target.indexInParent
+    // REMOVED 2026-09-30. This skipped a CLICK whose anchor matched the
+    // immediately preceding step, on the assumption that "one taught tap is
+    // always exactly one FlowStep, so a consecutive duplicate is always a
+    // capture artifact." That assumption is false, confirmed on-device today:
+    // a real Zomato teach tapped "Domino's Pizza" twice (search result, then
+    // the restaurant card) and recorded two legitimate, identical steps —
+    // replay skipped the second, stayed on the wrong screen, and typed the
+    // item into the global search bar instead of the restaurant's.
+    //
+    // FlowStep carries no timestamp, so this guard could never tell "same tap
+    // captured twice" from "user genuinely tapped twice" — it was structurally
+    // incapable of being correct. The artifact case it was written for is
+    // already handled at the SOURCE, at teach time, where the timestamps do
+    // exist: TapDedup.isSameTap (1500ms window) merges a raw-touch commit with
+    // the real click event, and TouchClaim.canClaim drops a second event for
+    // one tap. Those landed in a different lane than this guard and were never
+    // reconciled. The compensating control for a capture artifact that slips
+    // past both is the DUMP_FLOWS audit before replaying a freshly taught flow.
 }

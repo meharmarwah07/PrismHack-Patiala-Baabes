@@ -26,7 +26,14 @@ import com.calo.domain.semantic.ScreenElement
 // direct hit on a node that was already clickable/editable/scrollable.
 // Defaults false for handles that have no equivalent "matched vs climbed"
 // distinction (findNodeByValue, screenElements/nodeForElement).
-private class AndroidNodeHandle(val node: AccessibilityNodeInfo, val requiredClimb: Boolean = false) : NodeHandle
+private class AndroidNodeHandle(
+    val node: AccessibilityNodeInfo,
+    val requiredClimb: Boolean = false,
+    // The originally-matched element's bounds (see NodeWalker.ResolvedMatch).
+    // Tapped in preference to the climbed ancestor's centre, which can fall
+    // outside the element the user actually touched.
+    val matchedBounds: android.graphics.Rect? = null
+) : NodeHandle
 
 /**
  * :app's implementation of the domain [NodeProvider] interface — the one
@@ -93,9 +100,23 @@ class ReplayEngine(
         // 400ms sleep). A tap's effect isn't always visible instantly, so
         // always give it MIN_SETTLE_MS, then poll until two reads in a row
         // show the same screen, giving up after MAX_SETTLE_MS.
-        const val MIN_SETTLE_MS = 300L
+        const val MIN_SETTLE_MS = 1000L
         const val SETTLE_POLL_MS = 250L
-        const val MAX_SETTLE_MS = 4000L
+        const val MAX_SETTLE_MS = 8000L
+
+        // Raised 2026-09-30 after watching replay act on a half-drawn Zomato
+        // screen. Zomato renders in WAVES (measured the same day: 5, then 29,
+        // then 35 actionable elements across one flow), so two identical reads
+        // 250ms apart can land in a lull BETWEEN waves and declare a
+        // still-loading screen settled. Requiring several consecutive agreeing
+        // reads makes a brief lull insufficient; a genuinely finished screen
+        // still exits after STABLE_READS_REQUIRED polls.
+        //
+        // Budget check against ReplayPlanner.SETTLE_TIMEOUT_MS (15000ms):
+        // worst case here is MAX_CHANGE_WAIT_MS 2000 + MIN_SETTLE_MS 1000 +
+        // MAX_SETTLE_MS 8000 = 11000ms, leaving ~4s of headroom. Do not raise
+        // MAX_SETTLE_MS past 11000 without raising SETTLE_TIMEOUT_MS too.
+        const val STABLE_READS_REQUIRED = 3
 
         // After an action, how long to wait for the screen to start
         // changing before assuming the action doesn't navigate anywhere.
@@ -242,7 +263,33 @@ class ReplayEngine(
 
     override fun findNode(anchor: ElementAnchor): NodeHandle? {
         val match = nodeWalker.resolve(takeCachedRootOrFetch(), anchor) ?: return null
-        return AndroidNodeHandle(match.node, match.requiredClimb)
+        if (coversWholeScreen(match.node)) {
+            // Confirmed from a real uiautomator dump (2026-09-30, Zomato
+            // search results): a taught step anchored to
+            // "com.application.zomato:id/root" resolves to the WINDOW ROOT —
+            // a non-clickable ViewGroup spanning [0,0][1080,2412]. That is a
+            // teach-time capture failure: the anchor identifies the entire
+            // screen, i.e. nothing. ACTION_CLICK fails on it, and the
+            // coordinate fallback in performClick then taps its centre
+            // (always 540,1206), which on a real flow silently navigates
+            // somewhere unintended. Reporting "not found" is the honest
+            // answer — an anchor that matches everything has matched nothing.
+            Log.w(TAG, "Ignoring anchor that resolved to the whole window (${describe(match.node)}) — teach-time capture failure, not a real target")
+            match.node.recycle()
+            return null
+        }
+        return AndroidNodeHandle(match.node, match.requiredClimb, match.matchedBounds)
+    }
+
+    /** True when [node] spans (nearly) the entire display — i.e. it is the window root. */
+    private fun coversWholeScreen(node: AccessibilityNodeInfo): Boolean {
+        val metrics = service.resources.displayMetrics
+        val bounds = android.graphics.Rect()
+        node.getBoundsInScreen(bounds)
+        if (bounds.isEmpty) return false
+        val nodeArea = bounds.width().toLong() * bounds.height().toLong()
+        val screenArea = metrics.widthPixels.toLong() * metrics.heightPixels.toLong()
+        return screenArea > 0 && nodeArea >= screenArea * 9 / 10
     }
 
     // NodeWalker.findBySlotValue, not findByValue: this is specifically the
@@ -304,8 +351,74 @@ class ReplayEngine(
         val before = screenFingerprint()
         fingerprintBeforeAction = before
         Log.i(TAG, "Replay step $stepCounter: CLICK target=${describe(info)}")
-        var ok = info.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-        Log.i(TAG, "Replay step $stepCounter: CLICK result=$ok")
+
+        // Compose leaves get a real touch, not ACTION_CLICK (2026-09-30).
+        // Zomato's search-result cards are android.view.View with NO
+        // resourceId — Jetpack Compose's accessibility shape. They accept
+        // ACTION_CLICK, return true, and do nothing, because Compose handles
+        // the tap with its own gesture code; the accessibility layer only
+        // reports that the action was dispatched, never that it took effect.
+        // The detect-and-retry added earlier didn't catch it either: tapping
+        // the card dismisses the keyboard, which changes the visible-text
+        // fingerprint, so "the screen changed" read as success while the app
+        // had not navigated at all.
+        //
+        // Dispatching the gesture INSTEAD of ACTION_CLICK (rather than after
+        // it) is what keeps this safe: exactly one input reaches the app, so
+        // there is no double-fire risk on a node that would have honoured
+        // ACTION_CLICK anyway. A gesture at the element's own centre is also
+        // what a person does, so it works for both kinds of view.
+        val composeLeaf = info.viewIdResourceName == null &&
+            info.className?.toString() == "android.view.View"
+        var ok: Boolean
+        if (composeLeaf) {
+            // Prefer the ORIGINALLY MATCHED element's bounds over the climbed
+            // ancestor's — see NodeWalker.ResolvedMatch.matchedBounds for the
+            // (540,405)-vs-card-at-417 miss this fixes.
+            val bounds = handle.matchedBounds?.takeIf { !it.isEmpty }
+                ?: android.graphics.Rect().also { info.getBoundsInScreen(it) }
+            if (!bounds.isEmpty && info.isVisibleToUser) {
+                ok = service.tapAt(bounds.exactCenterX(), bounds.exactCenterY())
+                Log.i(TAG, "Replay step $stepCounter: CLICK via gesture (Compose leaf) at (${bounds.centerX()},${bounds.centerY()}) result=$ok")
+            } else {
+                ok = info.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                Log.i(TAG, "Replay step $stepCounter: CLICK result=$ok (Compose leaf not tappable by bounds)")
+            }
+        } else {
+            ok = info.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            Log.i(TAG, "Replay step $stepCounter: CLICK result=$ok")
+        }
+        // Widened 2026-09-30 from "only when handle.requiredClimb" to EVERY
+        // click that reports success. Confirmed on-device tonight: Zomato's
+        // search-result cards are Compose views that are themselves
+        // clickable=true (so no climb happens), yet performAction(ACTION_CLICK)
+        // returns true while the app does nothing — Compose handles the touch
+        // with its own gesture code and the accessibility layer only reports
+        // that the action was dispatched. Replay then carried on against a
+        // screen that never changed and typed the next step's value into the
+        // search bar.
+        //
+        // Unlike the climbed case (which fails closed), a DIRECT hit can be
+        // retried safely with a real finger tap at that same element's own
+        // bounds: it is the element we already resolved, not a guess, so this
+        // is the same tap by another route rather than a second, different
+        // action. The double-fire worry that made the climbed case fail closed
+        // doesn't apply the same way here — an action that genuinely took
+        // effect (a toggle, add-to-cart) changes the screen fingerprint, so
+        // this branch isn't reached for it.
+        if (ok && !handle.requiredClimb && !waitForFingerprintChange(before)) {
+            val bounds = android.graphics.Rect()
+            info.getBoundsInScreen(bounds)
+            if (!bounds.isEmpty && info.isVisibleToUser) {
+                Log.w(TAG, "Replay step $stepCounter: CLICK reported success but the screen never changed — retrying as a real tap at the same element")
+                ok = service.tapAt(bounds.exactCenterX(), bounds.exactCenterY())
+                Log.i(TAG, "Replay step $stepCounter: gesture retry at (${bounds.centerX()},${bounds.centerY()}) result=$ok")
+                if (ok) waitForFingerprintChange(screenFingerprint())
+            }
+            info.recycle()
+            return ok
+        }
+
         if (ok && handle.requiredClimb) {
             // Confirmed on-device (2026-09-29, Zomato): performAction(ACTION_
             // CLICK) can report true while doing nothing — some views handle
@@ -443,11 +556,17 @@ class ReplayEngine(
         Thread.sleep(MIN_SETTLE_MS)
         val deadline = System.currentTimeMillis() + MAX_SETTLE_MS
         var previous = screenFingerprint()
+        var stableReads = 1
         while (System.currentTimeMillis() < deadline) {
             Thread.sleep(SETTLE_POLL_MS)
             val current = screenFingerprint()
-            if (current == previous) return
-            previous = current
+            if (current == previous) {
+                stableReads++
+                if (stableReads >= STABLE_READS_REQUIRED) return
+            } else {
+                stableReads = 1
+                previous = current
+            }
         }
         Log.w(TAG, "Screen still changing after ${MAX_SETTLE_MS}ms — continuing anyway")
     }

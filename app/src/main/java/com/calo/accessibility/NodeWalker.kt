@@ -75,18 +75,58 @@ class NodeWalker {
      * Zomato — see that function's own comment), and that's only worth
      * verifying for the climbed case, not every click.
      */
-    data class ResolvedMatch(val node: AccessibilityNodeInfo, val requiredClimb: Boolean)
+    /**
+     * [matchedBounds] is the ORIGINAL matched node's on-screen rectangle,
+     * captured before any climb. Confirmed on-device 2026-09-30: replay
+     * tapped the CLIMBED ancestor's centre at (540,405) while the Zomato
+     * result card it belongs to spans [36,417][1044,711] — twelve pixels
+     * lower. The ancestor is larger than the card, so its centre isn't on
+     * it, and every gesture landed in the gap above. A real finger taps the
+     * visible label and lets the touch propagate up, which is what this
+     * rectangle lets ReplayEngine do.
+     */
+    data class ResolvedMatch(
+        val node: AccessibilityNodeInfo,
+        val requiredClimb: Boolean,
+        val matchedBounds: android.graphics.Rect
+    )
 
     private fun matched(node: AccessibilityNodeInfo, root: AccessibilityNodeInfo): ResolvedMatch {
         val requiredClimb = !(node === root || node.isClickable || node.isEditable || node.isScrollable)
-        return ResolvedMatch(actionable(node, root), requiredClimb)
+        // BEFORE actionable(): climbing recycles the node it starts from.
+        val bounds = android.graphics.Rect().also { node.getBoundsInScreen(it) }
+        return ResolvedMatch(actionable(node, root), requiredClimb, bounds)
     }
 
     fun resolve(root: AccessibilityNodeInfo?, anchor: ElementAnchor): ResolvedMatch? {
         if (root == null) return null
 
         anchor.resourceId?.let { rid ->
-            when (val p = pickAmong(root, anchor) { it.viewIdResourceName == rid }) {
+            // Index-aware FIRST (2026-09-30). This tier used to match on
+            // viewIdResourceName alone and discard the anchor's recorded
+            // indexInParent entirely — confirmed to be the cause of a real
+            // failure: Zomato gives BOTH the global search bar and a
+            // restaurant page's "search within menu" field the same id,
+            // "com.application.zomato:id/edittext", distinguished only by
+            // indexInParent (0 vs 1). Teaching records that difference
+            // correctly; this tier threw it away, both fields matched, and
+            // ContextPicker's first-in-traversal fallback picked the global
+            // bar — so replay typed the item into the search box it had
+            // already used instead of the restaurant's menu.
+            //
+            // Falls back to the id-only match when the indexed lookup finds
+            // nothing, so a screen whose child ordering shifted since teach
+            // time still resolves as it always did — this only ever narrows
+            // an otherwise-ambiguous match, it never loses one.
+            val indexed = anchor.indexInParent
+                ?.let { collectAllByResourceIdAndIndex(root, rid, it) }
+                ?: emptyList()
+            val p = if (indexed.isNotEmpty()) {
+                pickAmong(anchor, indexed, root)
+            } else {
+                pickAmong(root, anchor) { it.viewIdResourceName == rid }
+            }
+            when (p) {
                 is Pick.One -> return matched(p.node, root)
                 Pick.Refused -> return null
                 Pick.None -> Unit
@@ -112,7 +152,7 @@ class NodeWalker {
         val taughtLabel = anchor.contentDescription?.takeIf { it.isNotBlank() }
             ?: anchor.text?.takeIf { it.isNotBlank() }
         if (taughtLabel != null) {
-            findFuzzy(root, taughtLabel)?.let { return it }
+            findFuzzy(root, taughtLabel, excludeInputs = anchor.className?.contains("EditText", ignoreCase = true) != true)?.let { return it }
             // The element had a readable label and nothing on screen
             // resembles it: it isn't here. Falling through to "first
             // <className> at index N" would tap some unrelated element
@@ -180,19 +220,111 @@ class NodeWalker {
      */
     private fun pickAmong(anchor: ElementAnchor, matches: List<AccessibilityNodeInfo>, root: AccessibilityNodeInfo): Pick {
         if (matches.isEmpty()) return Pick.None
-        val contexts = if (matches.size > 1 && !anchor.contextLabel.isNullOrBlank()) {
-            matches.map { contextLabelFor(it) }
+
+        // Narrow by the taught className BEFORE ContextPicker (2026-09-30).
+        // ContextPicker falls back to "first in traversal order" when no
+        // contextLabel was recorded, and first-in-traversal is often wrong
+        // when several elements share one label. Confirmed on-device today:
+        // after searching Zomato for "Dominos", BOTH the search bar
+        // (android.widget.EditText, now showing the submitted query) and the
+        // restaurant card (android.view.View) carry the text "Domino's
+        // Pizza". The search bar comes first in the tree, so the taught
+        // SELECT_RESULT tap resolved to the text FIELD: clicking it merely
+        // focused it, nothing navigated, and the next SET_TEXT step typed
+        // the item into that same search bar instead of the restaurant's menu.
+        //
+        // The anchor already records the taught element's className, so use
+        // it. .ifEmpty { matches } keeps this strictly additive: if the app
+        // changed the class between teach and replay, nothing is lost and
+        // the weaker tiers below (contentDescription, fuzzy label, role)
+        // still get their turn.
+        val candidates = if (matches.size > 1 && anchor.className != null) {
+            matches.filter { it.className?.toString() == anchor.className }.ifEmpty { matches }
         } else {
-            matches.map { null }
+            matches
+        }
+
+        // Second narrowing (2026-09-30, same Zomato screen): after submitting
+        // a search, the search bar RE-DISPLAYS the query, so its label node
+        // carries the same text as the result card — and on Zomato that node
+        // is a custom view, not an EditText, so the className filter above
+        // doesn't exclude it. It still sits INSIDE the search input, and a
+        // taught tap on a search result is never a tap inside a text field.
+        // Drop candidates living under an editable ancestor, unless the taught
+        // anchor was itself an input (then the field IS the target).
+        // NOT gated on candidates.size > 1, and NO ifEmpty fallback — both
+        // were bugs (fixed 2026-09-30). A search screen re-displays the
+        // submitted query, so while the results are still rendering the
+        // search bar is briefly the ONLY node carrying the taught label.
+        // With a size>1 guard this filter never ran, the first lookup matched
+        // the field, and replay typed the next step's value straight into it.
+        // Returning "no match" instead lets findNodeWithRetry keep waiting
+        // for the real target to appear, which is the whole point of that
+        // retry window.
+        val anchorIsInput = anchor.className?.contains("EditText", ignoreCase = true) == true
+        val narrowed = if (anchorIsInput) candidates else candidates.filterNot { isInsideTextInput(it) }
+        if (narrowed.isEmpty()) {
+            matches.forEach { if (it !== root) it.recycle() }
+            return Pick.None
+        }
+
+        // Third narrowing (2026-09-30): prefer candidates that can actually be
+        // clicked. Confirmed from a real replay log — a taught tap on a Zomato
+        // restaurant card recorded the generic anchor
+        // "com.application.zomato:id/root" (no text, no contentDescription),
+        // an id the app reuses across many nodes. With no contextLabel to
+        // disambiguate, ContextPicker falls back to first-in-traversal, which
+        // picked a node whose performAction(ACTION_CLICK) returned FALSE — a
+        // node that refuses a click is not the element the user tapped. The
+        // coordinate fallback then blind-tapped whatever was at those bounds
+        // and nothing navigated. .ifEmpty keeps this additive: if none of the
+        // candidates is directly clickable (the taught node was a label that
+        // climbs to a clickable ancestor), nothing is discarded.
+        val tappable = if (narrowed.size > 1) {
+            narrowed.filter { it.isClickable }.ifEmpty { narrowed }
+        } else {
+            narrowed
+        }
+
+        val contexts = if (tappable.size > 1 && !anchor.contextLabel.isNullOrBlank()) {
+            tappable.map { contextLabelFor(it) }
+        } else {
+            tappable.map { null }
         }
         val index = ContextPicker.pick(anchor.contextLabel, contexts)
-        val chosen = index?.let { matches[it] }
+        val chosen = index?.let { tappable[it] }
         matches.forEach { if (it !== chosen && it !== root) it.recycle() }
         if (chosen == null) {
             android.util.Log.w("Calo", "${matches.size} elements match ${anchor.resourceId ?: anchor.text ?: anchor.contentDescription ?: anchor.className} but none is in the taught row \"${anchor.contextLabel}\"")
             return Pick.Refused
         }
         return Pick.One(chosen)
+    }
+
+    /**
+     * Nodes matching [resourceId] AND sitting at [indexInParent] among their
+     * own parent's children. Same shape and recycling contract as
+     * [collectAllByClassNameAndIndex] — a plain [collectAll] predicate can't
+     * see a node's index, which is exactly the signal needed to tell two
+     * same-id fields apart (see [resolve]'s resourceId tier).
+     */
+    private fun collectAllByResourceIdAndIndex(
+        root: AccessibilityNodeInfo,
+        resourceId: String,
+        indexInParent: Int
+    ): List<AccessibilityNodeInfo> {
+        val found = mutableListOf<AccessibilityNodeInfo>()
+        fun walk(node: AccessibilityNodeInfo, myIndex: Int, isRoot: Boolean) {
+            val isMatch = node.viewIdResourceName == resourceId && myIndex == indexInParent
+            if (isMatch) found += node
+            for (i in 0 until node.childCount) {
+                val child = node.getChild(i) ?: continue
+                walk(child, i, isRoot = false)
+            }
+            if (!isMatch && !isRoot) node.recycle()
+        }
+        walk(root, -1, isRoot = true)
+        return found
     }
 
     /**
@@ -220,6 +352,40 @@ class NodeWalker {
         walk(root, -1, isRoot = true)
         return found
     }
+
+    /**
+     * True when [node] is the search/text-input box or lives inside one —
+     * checked up to 4 ancestors, which covers a query label rendered as a
+     * child view of the input container. [node] is borrowed; ancestors
+     * fetched here are recycled.
+     */
+    private fun isInsideTextInput(node: AccessibilityNodeInfo): Boolean {
+        if (isTextInput(node)) return true
+        var ancestor = node.parent
+        var depth = 0
+        while (ancestor != null && depth < 4) {
+            if (isTextInput(ancestor)) {
+                ancestor.recycle()
+                return true
+            }
+            val next = ancestor.parent
+            ancestor.recycle()
+            ancestor = next
+            depth++
+        }
+        return false
+    }
+
+    /**
+     * isEditable alone is not enough (2026-09-30, confirmed from a real
+     * uiautomator dump of Zomato's search-results screen): the search bar
+     * there is an android.widget.EditText that re-displays the submitted
+     * query but is marked focusable="false" — a collapsed box acting as a
+     * button — so it can report isEditable=false while still being the
+     * text input. The class name is the signal that survives that.
+     */
+    private fun isTextInput(node: AccessibilityNodeInfo): Boolean =
+        node.isEditable || node.className?.toString()?.contains("EditText", ignoreCase = true) == true
 
     /**
      * Text of the row/card around [node]: the nearest ancestor (below any
@@ -253,14 +419,18 @@ class NodeWalker {
      * clickable ancestor. Only candidates that pass the threshold are kept
      * while walking; everything else is recycled on the way.
      */
-    private fun findFuzzy(root: AccessibilityNodeInfo, taughtLabel: String): ResolvedMatch? {
+    private fun findFuzzy(root: AccessibilityNodeInfo, taughtLabel: String, excludeInputs: Boolean): ResolvedMatch? {
         val labels = mutableListOf<String>()
         val nodes = mutableListOf<AccessibilityNodeInfo>()
 
         fun walk(node: AccessibilityNodeInfo, isRoot: Boolean) {
             val label = listOfNotNull(node.contentDescription?.toString(), node.text?.toString())
                 .maxByOrNull { FuzzyLabel.similarity(taughtLabel, it) }
-            val keep = label != null && FuzzyLabel.similarity(taughtLabel, label) >= FuzzyLabel.THRESHOLD
+            // Same rule as pickAmong: a taught tap that wasn't on an input
+            // must never fuzzy-match the search field that happens to be
+            // showing the same words.
+            val keep = label != null && FuzzyLabel.similarity(taughtLabel, label) >= FuzzyLabel.THRESHOLD &&
+                !(excludeInputs && isInsideTextInput(node))
             if (keep) {
                 labels += label!!
                 nodes += node

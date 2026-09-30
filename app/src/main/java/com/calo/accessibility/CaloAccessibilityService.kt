@@ -445,9 +445,22 @@ class CaloAccessibilityService : AccessibilityService() {
      * Blocks until the gesture finishes, so call it off the main thread.
      */
     fun tapAt(x: Float, y: Float): Boolean {
-        val path = android.graphics.Path().apply { moveTo(x, y) }
+        // 2026-09-30: was a 60ms ZERO-LENGTH stroke. A path with only moveTo
+        // produces just ACTION_DOWN then ACTION_UP with no ACTION_MOVE, and
+        // some gesture detectors — Jetpack Compose's detectTapGestures among
+        // the suspects — can ignore a stroke that never moves or is very
+        // short. Zomato's search-result cards are Compose leaves that
+        // accepted ACTION_CLICK without acting and did not respond to the
+        // zero-length tap either, so this gives the gesture both a longer
+        // press (120ms, still well inside ViewConfiguration's ~500ms
+        // long-press threshold, so it stays a TAP) and a 2px drift so the
+        // stream is DOWN -> MOVE -> UP, exactly what a real finger produces.
+        val path = android.graphics.Path().apply {
+            moveTo(x, y)
+            lineTo(x + 2f, y + 2f)
+        }
         val gesture = android.accessibilityservice.GestureDescription.Builder()
-            .addStroke(android.accessibilityservice.GestureDescription.StrokeDescription(path, 0, 60))
+            .addStroke(android.accessibilityservice.GestureDescription.StrokeDescription(path, 0, 120))
             .build()
         val done = java.util.concurrent.CountDownLatch(1)
         var completed = false

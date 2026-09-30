@@ -233,9 +233,18 @@ class names, and whether `AccessibilityNodeInfo.isPassword` fired anywhere
 (checked first — the strongest, platform-native signal). `classify()`
 fails closed twice over: an unreadable screen (`root == null`) is always
 `Blocked`, never treated as "nothing to worry about," and a password field
-blocks regardless of what the surrounding text says. Otherwise it does a
-case-insensitive substring match against ~30 keywords across four
-categories (password, OTP, payment, login). This exact behavior is what
+blocks regardless of what the surrounding text says. Otherwise it applies a
+**two-tier** keyword test (revised 30 Sep 2026). Strong signals — password/
+OTP/login wording, plus explicit payment-entry terms ("card number", "cvv",
+"upi pin", "add new card", "netbanking", "payment options") — block on a
+single case-insensitive substring hit across text, resource ids and class
+names. Weak payment wording ("pay", "upi", "wallet", "payment", …) needs
+**two or more distinct** matches, is matched on word boundaries, and is
+searched only in on-screen text, never in ids or class names. The earlier
+single-tier version matched "pay" and "place order" as bare substrings
+everywhere, which blocked on the **cart** screen — the screen a flow must
+act on to reach payment at all. See `KNOWN_LIMITATIONS.md` for the coverage
+cost this still carries. This exact behavior is what
 `CredentialGateRulesTest.kt` calls, in its own doc comment, **"the T11 test
 case made concrete"** — covering the unreadable-screen fail-closed case,
 the password-field-blocks-regardless-of-text case, keyword detection per
@@ -250,11 +259,16 @@ the target node (§2's fallback order); not found is `ReplayResult.Stuck`.
 `performSetText`. Any `performAction()` call — click, set-text, or
 scroll — returning `false` (e.g. a custom widget that silently doesn't
 support `ACTION_SET_TEXT`) also surfaces as `Stuck`, never silently treated
-as success. Between steps, `ReplayEngine.awaitIdle()` is a fixed
-`Thread.sleep(400)` — explicitly flagged in its own code comment as a
-simplification, not a real window-content-changed listener; a
-slower-than-400ms real screen transition would make the next step's
-`findNode()` fail and report `Stuck` on an otherwise-working flow.
+as success. Between steps, `ReplayEngine.waitForStableScreen()` waits for
+the screen to *start* changing (up to 2000ms), sleeps `MIN_SETTLE_MS`
+(1000ms), then polls a whole-screen text fingerprint every 250ms until
+**three consecutive reads agree**, giving up after `MAX_SETTLE_MS` (8000ms).
+Three agreeing reads rather than two is deliberate: a Compose screen renders
+in waves, and a brief lull between waves satisfied a two-read check while
+the screen was still half-drawn. Node lookups are themselves retried for up
+to 6 seconds (`FIND_RETRY_WINDOW_MS`), so a step waits for the element it
+needs to exist rather than for a fixed delay — a fast screen costs nothing
+extra, a slow one waits exactly as long as it must.
 
 **Cross-app launch.** `CaloOrchestrator.launchAndWaitForForeground()`
 (§1 step 6) fires `getLaunchIntentForPackage(targetPackage)` with
@@ -267,3 +281,46 @@ doc comment states a real limitation plainly: it launches the target app's
 that screen isn't reachable from the app's default open state, `NodeWalker`
 won't find the anchors and replay correctly reports `Stuck` rather than
 misfiring, but it also won't succeed.
+
+
+## 5. Touch dispatch — why some taps are gestures, not actions
+
+Two different mechanisms can act on a node, and the difference matters:
+
+- **`performAction(ACTION_CLICK)`** is *semantic*. It asks the view to
+  behave as if clicked. No touch is generated, and the accessibility layer
+  reports only that the action was **dispatched** — never that it took
+  effect.
+- **`dispatchGesture()`** is *synthetic touch*. It injects at the
+  `InputDispatcher` level, so the app receives real `MotionEvent`s
+  (`DOWN → MOVE → UP`) — the same path a finger, or a game's
+  `onTouchEvent`, sees. `CaloAccessibilityService.tapAt()` builds a 120ms
+  stroke with a 2px drift so the event stream is indistinguishable from a
+  real tap.
+
+Jetpack Compose is why both exist here. A Compose result card is an
+`android.view.View` with no resource id, marked `clickable="true"`. It
+accepts `ACTION_CLICK`, returns `true`, and does nothing, because Compose
+handles the tap in its own gesture code. Confirmed on-device against
+Zomato, 30 Sep 2026.
+
+`ReplayEngine.performClick()` therefore dispatches a **gesture instead of**
+`ACTION_CLICK` for that node shape — instead of, not in addition to, so
+exactly one input reaches the app and a node that *would* have honoured
+`ACTION_CLICK` can never be double-fired.
+
+**Where the gesture lands** turned out to matter as much as how it is
+delivered. `NodeWalker` matches a readable label — usually a `TextView`
+inside the card — and climbs to the nearest clickable ancestor, because
+`ACTION_CLICK` fails on a non-clickable node. That ancestor can be larger
+than the card, so its centre is not on it: measured on-device, the gesture
+landed at **(540,405)** while the card spanned `[36,417][1044,711]`. Twelve
+pixels above, in the gap, and every "make the tap more realistic" change
+failed for that reason until the coordinates were printed.
+`ResolvedMatch` now carries `matchedBounds` — the originally matched
+element's rectangle, captured *before* the climb — and the gesture targets
+that. A person taps the visible words; the touch propagates up to whatever
+owns the click. Calo now does the same.
+
+A non-Compose node still uses `ACTION_CLICK`, with the existing
+coordinate fallback if it returns `false`.
