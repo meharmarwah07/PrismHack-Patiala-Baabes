@@ -99,7 +99,20 @@ object ReplayPlanner {
     // (no further provider calls are attempted for that step), 5000ms is
     // also the worst-case total added latency per replay() call, not a
     // multiplier per step.
+    //
+    // This 5s budget applies to node resolution, gate reads and perform*
+    // actions ONLY. Screen-settle waits (awaitScreenChange, the WAIT step's
+    // awaitIdle) get their own SETTLE_TIMEOUT_MS below: in :app they delegate
+    // to ReplayEngine.waitForStableScreen(), whose worst case is
+    // MAX_CHANGE_WAIT_MS 2000 + MIN_SETTLE_MS 300 + MAX_SETTLE_MS 4000 = 6300ms
+    // before counting the ~17 full-tree text walks its settle poll does. Bounding
+    // those by 5s aborted steps whose tap had already landed. Don't re-collapse
+    // the two budgets.
     private const val STEP_TIMEOUT_MS = 5_000L
+
+    // Ceiling for screen-settle waits: comfortably above the 6300ms worst case
+    // above, still a backstop against a genuinely hung Binder call.
+    private const val SETTLE_TIMEOUT_MS = 15_000L
 
     // Binder calls into a dead/killed window are not guaranteed to honor
     // Thread.interrupt() — the underlying IPC can stay blocked in native
@@ -129,16 +142,22 @@ object ReplayPlanner {
     // on the device later, unsupervised, after this function has already
     // told the caller Stuck. See ReplayResult.Stuck.actionMayHaveExecuted's
     // doc for how callers must treat that.
-    private fun <T> withStepTimeout(stepOrder: Int, opName: String, isAction: Boolean = false, block: () -> T): T {
+    private fun <T> withStepTimeout(
+        stepOrder: Int,
+        opName: String,
+        isAction: Boolean = false,
+        timeoutMs: Long = STEP_TIMEOUT_MS,
+        block: () -> T
+    ): T {
         val future = timeoutExecutor.submit(Callable(block))
         return try {
-            future.get(STEP_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            future.get(timeoutMs, TimeUnit.MILLISECONDS)
         } catch (e: TimeoutException) {
             future.cancel(true) // best-effort; may not actually unblock a stuck Binder call
             throw StepTimeoutException(
                 stepOrder,
                 isAction,
-                "step $stepOrder timed out after ${STEP_TIMEOUT_MS}ms waiting for $opName — target screen may be gone"
+                "step $stepOrder timed out after ${timeoutMs}ms waiting for $opName — target screen may be gone"
             )
         } catch (e: ExecutionException) {
             throw (e.cause ?: e)
@@ -159,7 +178,7 @@ object ReplayPlanner {
     // waits), so a timeout here surfaces as an ordinary Stuck, never
     // actionMayHaveExecuted.
     private fun awaitScreenChange(stepOrder: Int, provider: NodeProvider) {
-        withStepTimeout(stepOrder, "awaitScreenChange") { provider.awaitScreenChange() }
+        withStepTimeout(stepOrder, "awaitScreenChange", timeoutMs = SETTLE_TIMEOUT_MS) { provider.awaitScreenChange() }
     }
 
     // Confirmed on-device (2026-09-29, Zomato search-as-you-type): a screen
@@ -277,7 +296,7 @@ object ReplayPlanner {
         mode: ReplayMode
     ): ReplayResult? {
         if (step.action == ActionType.WAIT) {
-            withStepTimeout(step.order, "awaitIdle") { provider.awaitIdle() }
+            withStepTimeout(step.order, "awaitIdle", timeoutMs = SETTLE_TIMEOUT_MS) { provider.awaitIdle() }
             return null
         }
 

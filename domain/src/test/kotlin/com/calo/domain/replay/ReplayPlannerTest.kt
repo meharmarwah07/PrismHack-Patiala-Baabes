@@ -549,4 +549,21 @@ class ReplayPlannerTest {
         assertEquals(listOf("id/results_list", "id/results_list"), provider.scrollCalls)
         assertEquals(listOf("id/results_list", "id/results_list"), provider.findNodeCalls)
     }
+
+    @Test
+    fun `a screen-settle wait slower than the 5s step timeout still completes`() {
+        // ReplayEngine.waitForStableScreen can legitimately run ~6.3s+ in :app.
+        // The tap already landed; the settle wait must not be cut off by the
+        // 5s node-resolution budget.
+        val inner = FakeNodeProvider(emptyMap(), clearSignals)
+        val slowSettle = object : NodeProvider by inner {
+            override fun awaitScreenChange() {
+                Thread.sleep(7_000)
+            }
+        }
+        val result = ReplayPlanner.replay(listOf(clickStep(1, "id/menu")), emptyMap(), slowSettle)
+
+        assertEquals(ReplayResult.Completed, result)
+        assertEquals(listOf("id/menu"), inner.clickCalls)
+    }
 }
