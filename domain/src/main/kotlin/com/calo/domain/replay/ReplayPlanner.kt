@@ -8,6 +8,7 @@ import com.calo.domain.model.FlowStep
 import com.calo.domain.semantic.PopupRules
 import com.calo.domain.semantic.RoleContext
 import com.calo.domain.semantic.RoleMatch
+import com.calo.domain.semantic.ResultLabel
 import com.calo.domain.semantic.RoleMatcher
 import com.calo.domain.semantic.SemanticRole
 import com.calo.domain.slots.SlotResolver
@@ -172,6 +173,10 @@ object ReplayPlanner {
     // few times, spaced out, before being treated as genuinely absent —
     // bounded well inside the outer STEP_TIMEOUT_MS backstop, so a
     // genuinely-gone element still fails within the same overall budget.
+    private const val TAUGHT_RESULT_WAIT_MS = 7_000L
+    private const val TAUGHT_RESULT_POLL_MS = 500L
+    private const val TAUGHT_RESULT_SCROLL_AFTER_POLLS = 4
+    private const val TAUGHT_RESULT_MAX_SCROLLS = 4
     private const val FIND_RETRY_INTERVAL_MS = 250L
     private const val FIND_RETRY_WINDOW_MS = 1_500L
 
@@ -399,12 +404,14 @@ object ReplayPlanner {
                 withStepTimeout(step.order, "findNode") { findNodeWithRetry(provider, step.target) }
                     ?.let { return Target.Found(it) }
                 val role = step.role ?: return Target.Missing(notFound)
-                locateByRole(role, step, slotValues, query, provider)
+                locateByRole(role, step, slotValues, query, provider, waitForTaughtResult = true)
             }
             ReplayMode.SEMANTIC -> {
                 val role = step.role
                 if (role != null) {
-                    locateByRole(role, step, slotValues, query, provider)
+                    // Cross-app: the taught item belongs to ANOTHER app and will never appear
+                    // here, so waiting/scrolling for it would only add delay.
+                    locateByRole(role, step, slotValues, query, provider, waitForTaughtResult = false)
                 } else {
                     // A slot step with no role: only what a person would
                     // read (text / content description) is meaningful on
@@ -427,15 +434,52 @@ object ReplayPlanner {
         step: FlowStep,
         slotValues: Map<String, String>,
         query: String?,
-        provider: NodeProvider
+        provider: NodeProvider,
+        waitForTaughtResult: Boolean
     ): Target {
         val expectedLabel = if (role == SemanticRole.SELECT_RESULT) {
             step.slotName?.let { slotValues[it] } ?: step.target.text ?: step.recordedValue
+                ?: ResultLabel.fromContentDescription(step.target.contentDescription)
         } else {
             null
         }
         val ctx = RoleContext(query = query, expectedLabel = expectedLabel, index = step.roleIndex ?: 1)
-        val elements = withStepTimeout(step.order, "screenElements") { provider.screenElements() }
+        var elements = withStepTimeout(step.order, "screenElements") { provider.screenElements() }
+
+        // Confirmed on-device (2026-09-30, Zomato): a search results page fills in over
+        // several seconds (5, 29, then 35 actionable elements on three runs of one flow),
+        // so one early snapshot missed the taught restaurant and the positional fallback
+        // tapped a section header instead. When a specific item was taught, wait for it to
+        // show up before settling for a guess.
+        if (waitForTaughtResult && role == SemanticRole.SELECT_RESULT && !expectedLabel.isNullOrBlank()) {
+            val deadline = System.currentTimeMillis() + TAUGHT_RESULT_WAIT_MS
+            var polls = 0
+            var scrolls = 0
+            var canScroll = true
+            while (RoleMatcher.matchTaughtResult(elements, ctx) == null &&
+                System.currentTimeMillis() < deadline
+            ) {
+                Thread.sleep(TAUGHT_RESULT_POLL_MS)
+                polls++
+                // A list screen only exposes the rows it has drawn, so a taught item below
+                // the fold is invisible however long we wait: once the page has had a
+                // moment to settle, scroll down a few times looking for it.
+                if (canScroll && polls >= TAUGHT_RESULT_SCROLL_AFTER_POLLS && scrolls < TAUGHT_RESULT_MAX_SCROLLS) {
+                    if (withStepTimeout(step.order, "scrollScreen", isAction = true) { provider.scrollScreen(true) }) {
+                        scrolls++
+                    } else {
+                        canScroll = false
+                    }
+                }
+                elements = withStepTimeout(step.order, "screenElements") { provider.screenElements() }
+            }
+            // Not found: undo our scrolling so the positional fallback below sees the same
+            // view it always did, not one we moved.
+            if (scrolls > 0 && RoleMatcher.matchTaughtResult(elements, ctx) == null) {
+                repeat(scrolls) { withStepTimeout(step.order, "scrollScreen", isAction = true) { provider.scrollScreen(false) } }
+                elements = withStepTimeout(step.order, "screenElements") { provider.screenElements() }
+            }
+        }
 
         return when (val match = RoleMatcher.match(role, elements, ctx)) {
             is RoleMatch.Found -> withStepTimeout(step.order, "nodeForElement") { provider.nodeForElement(match.element) }

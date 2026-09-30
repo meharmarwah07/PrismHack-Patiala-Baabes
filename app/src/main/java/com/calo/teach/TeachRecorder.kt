@@ -8,6 +8,7 @@ import com.calo.accessibility.TapTiming
 import com.calo.domain.model.ActionType
 import com.calo.domain.model.ElementAnchor
 import com.calo.domain.model.FlowStep
+import com.calo.domain.teach.ForeignScrollFilter
 import com.calo.domain.teach.PostTypingTapResolver
 import com.calo.domain.teach.RawTouchCaptureGate
 import com.calo.domain.teach.ScrollCoalescer
@@ -1092,7 +1093,7 @@ class TeachRecorder(
         steps += step
     }
 
-    fun currentSteps(): List<FlowStep> = steps.toList()
+    fun currentSteps(): List<FlowStep> = ForeignScrollFilter.filter(steps.toList(), targetPackage)
 
     /**
      * Re-loads a teaching session's steps from TeachCheckpoint after the

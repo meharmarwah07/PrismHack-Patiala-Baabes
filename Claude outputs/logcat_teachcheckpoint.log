@@ -1,0 +1,84 @@
+--------- beginning of main
+09-28 16:03:02.912 I/CaloTouchCapture(28705): [1790591582912] setServiceInfo: requested=false flags 80 -> 80 isTouchExplorationEnabled(system)=false
+09-28 16:03:04.012 I/CaloTouchCapture(28705): [1790591584012] setServiceInfo: requested=false flags 80 -> 80 isTouchExplorationEnabled(system)=false
+09-28 16:03:10.164 I/CaloTouchCapture(28705): [1790591590164] setServiceInfo: requested=false flags 80 -> 80 isTouchExplorationEnabled(system)=false
+09-28 16:03:11.254 I/CaloTouchCapture(28705): [1790591591254] setServiceInfo: requested=false flags 80 -> 80 isTouchExplorationEnabled(system)=false
+09-28 16:03:24.283 I/CaloTouchCapture(28705): [1790591604283] setServiceInfo: requested=false flags 80 -> 80 isTouchExplorationEnabled(system)=false
+09-28 16:03:25.404 I/CaloTouchCapture(28705): [1790591605404] setServiceInfo: requested=false flags 80 -> 80 isTouchExplorationEnabled(system)=false
+09-28 16:03:39.619 I/CaloTouchCapture(28705): [1790591619619] setServiceInfo: requested=true flags 80 -> 84 isTouchExplorationEnabled(system)=false
+09-28 16:03:39.620 D/CaloTouchCapture(28705): [1790591619620] registered, initial state=STATE_CLEAR maxPointerCount=32 isTouchExplorationEnabled(system)=false
+09-28 16:04:17.699 I/CaloTouchCapture(28705): [1790591657699] setServiceInfo: requested=false flags 84 -> 80 isTouchExplorationEnabled(system)=true
+09-28 16:04:17.699 I/CaloTouchCapture(28705): [1790591657693] Keyboard visible=true -> touch exploration capability requested=false (setServiceInfo took 6ms) isTouchExplorationEnabled(system)=true
+09-28 16:04:28.456 W/Calo    (28705): Dropped CLICK (source null, no text or contentDescription segment resolved on any of the 3 cached screens): pkg=com.application.zomato cls=android.widget.TextView
+09-28 16:04:28.582 I/CaloTouchCapture(28705): [1790591668582] setServiceInfo: requested=true flags 80 -> 84 isTouchExplorationEnabled(system)=false
+09-28 16:04:28.582 I/CaloTouchCapture(28705): [1790591668567] Keyboard visible=false -> touch exploration capability requested=true (setServiceInfo took 15ms) isTouchExplorationEnabled(system)=false
+09-28 16:04:28.586 D/CaloTouchCapture(28705): [1790591668586] registered, initial state=STATE_CLEAR maxPointerCount=32 isTouchExplorationEnabled(system)=false
+09-28 16:06:40.179 I/CaloTouchCapture(32425): [1790591800178] setServiceInfo: requested=false flags 84 -> 80 isTouchExplorationEnabled(system)=true
+09-28 16:06:40.215 W/Calo    (32425): Resuming a teaching session interrupted by a process restart: 19 step(s) recovered, targetPackage=null
+09-28 16:06:40.298 I/CaloTouchCapture(32425): [1790591800298] setServiceInfo: requested=true flags 80 -> 84 isTouchExplorationEnabled(system)=true
+09-28 16:06:40.299 D/CaloTouchCapture(32425): [1790591800299] registered, initial state=STATE_CLEAR maxPointerCount=32 isTouchExplorationEnabled(system)=true
+09-28 16:08:56.755 I/Calo    (32425): Dropped CLICK with no unclaimed finger touch behind it (app-generated, or a second event for one tap): resourceId=com.application.zomato:id/ll_id4 text=null contentDescription=Try New Deals double tap to collapse
+09-28 16:09:55.259 I/CaloTouchCapture(32425): [1790591995259] setServiceInfo: requested=false flags 84 -> 80 isTouchExplorationEnabled(system)=true
+09-28 16:11:42.438 I/CaloTouchCapture(32425): [1790592102438] setServiceInfo: requested=true flags 80 -> 84 isTouchExplorationEnabled(system)=false
+09-28 16:11:42.439 D/CaloTouchCapture(32425): [1790592102439] registered, initial state=STATE_CLEAR maxPointerCount=32 isTouchExplorationEnabled(system)=false
+09-28 16:12:20.897 I/Calo    (32425): Dropped CLICK with no unclaimed finger touch behind it (app-generated, or a second event for one tap): resourceId=null text=null contentDescription=null
+09-28 16:12:20.897 W/Calo    (32425): Low-confidence CLICK anchor (no resourceId/text/contentDescription, className=android.widget.LinearLayout) from real CLICK event
+09-28 16:13:27.641 D/CaloTouchCapture(32425): [1790592207641] state=STATE_TOUCH_INTERACTING
+09-28 16:13:27.645 D/CaloTapTiming(32425): delegation stateBefore=STATE_TOUCH_INTERACTING stateAfter=STATE_TOUCH_INTERACTING
+09-28 16:13:27.659 D/CaloTouchCapture(32425): [1790592207645] onMotionEvent action=ACTION_DOWN x=753.0 y=35.25 state=STATE_TOUCH_INTERACTING isTouchExplorationEnabled(system)=true ourFlagRequested=true
+09-28 16:13:27.664 D/CaloTouchCapture(32425): [1790592207664] onMotionEvent action=ACTION_MOVE x=753.0 y=35.5 state=STATE_TOUCH_INTERACTING
+09-28 16:13:27.667 D/CaloTouchCapture(32425): [1790592207667] state=STATE_DELEGATING
+09-28 16:13:27.667 D/CaloTouchCapture(32425): [1790592207667] onMotionEvent action=ACTION_MOVE x=751.5 y=40.5 state=STATE_DELEGATING
+09-28 16:13:27.668 D/CaloTouchCapture(32425): [1790592207668] onMotionEvent action=ACTION_MOVE x=749.5 y=45.25 state=STATE_DELEGATING
+09-28 16:13:27.668 D/CaloTouchCapture(32425): [1790592207668] onMotionEvent action=ACTION_MOVE x=747.0 y=50.5 state=STATE_DELEGATING
+09-28 16:13:27.668 D/CaloTouchCapture(32425): [1790592207668] onMotionEvent action=ACTION_MOVE x=744.25 y=57.75 state=STATE_DELEGATING
+09-28 16:13:27.669 D/CaloTouchCapture(32425): [1790592207669] onMotionEvent action=ACTION_MOVE x=741.25 y=66.75 state=STATE_DELEGATING
+09-28 16:13:27.670 D/CaloTouchCapture(32425): [1790592207669] onMotionEvent action=ACTION_MOVE x=738.75 y=77.5 state=STATE_DELEGATING
+09-28 16:13:27.718 D/CaloTouchCapture(32425): [1790592207718] state=STATE_CLEAR
+09-28 16:13:27.722 D/CaloCredentialGatePerf(32425): CredentialGate.extractSignals: nodeCount=32 walkMs=22.88474
+09-28 16:13:27.733 D/CaloTapTiming(32425): tapId=1 thread=pool-2-thread-1 controllerStateBefore=STATE_TOUCH_INTERACTING queueWaitMs=11.089896 queueDepthAtArrival=1 queueDepthAtStart=1 rootAcquireMs=8.752761 boundsCalls=7 boundsTotalMs=0.149479 traversalMs=4.826667 semanticCheckMs=5.224792 credentialGateMs=38.712396 totalResolutionMs=62.217552 x=753 y=35 pkg=com.oplus.wirelesssettings gateClear=true onKeyboard=false -> anchor=ElementAnchor(resourceId=com.oplus.wirelesssettings:id/coordinator, text=Wi-Fi, contentDescription=null, className=android.view.ViewGroup, indexInParent=0, hintText=null, contextLabel=null)
+09-28 16:13:29.161 I/Calo    (32425): Committed Finding-6 raw-touch CLICK: resourceId=com.oplus.wirelesssettings:id/coordinator text=Wi-Fi contentDescription=null
+09-28 16:13:57.792 D/CaloTouchCapture(32425): [1790592237792] state=STATE_TOUCH_INTERACTING
+09-28 16:13:57.805 D/CaloTapTiming(32425): delegation stateBefore=STATE_TOUCH_INTERACTING stateAfter=STATE_TOUCH_INTERACTING
+09-28 16:13:57.808 D/CaloTouchCapture(32425): [1790592237805] onMotionEvent action=ACTION_DOWN x=947.5 y=2029.0 state=STATE_TOUCH_INTERACTING isTouchExplorationEnabled(system)=true ourFlagRequested=true
+09-28 16:13:57.809 D/CaloTouchCapture(32425): [1790592237809] state=STATE_DELEGATING
+09-28 16:13:57.839 D/CaloTapTiming(32425): tapId=2 thread=pool-2-thread-1 controllerStateBefore=STATE_TOUCH_INTERACTING queueWaitMs=1.366094 queueDepthAtArrival=1 queueDepthAtStart=1 rootAcquireMs=26.375157 boundsCalls=0 boundsTotalMs=0.0 traversalMs=0.0 semanticCheckMs=0.0 credentialGateMs=0.003802 totalResolutionMs=29.245365 x=947 y=2029 pkg=com.android.systemui gateClear=true onKeyboard=false -> anchor=null
+09-28 16:13:57.910 D/CaloTouchCapture(32425): [1790592237909] state=STATE_CLEAR
+09-28 16:13:58.421 D/CaloTouchCapture(32425): [1790592238421] state=STATE_TOUCH_INTERACTING
+09-28 16:13:58.433 D/CaloTapTiming(32425): delegation stateBefore=STATE_TOUCH_INTERACTING stateAfter=STATE_TOUCH_INTERACTING
+09-28 16:13:58.443 D/CaloTouchCapture(32425): [1790592238434] onMotionEvent action=ACTION_DOWN x=865.5 y=1851.75 state=STATE_TOUCH_INTERACTING isTouchExplorationEnabled(system)=true ourFlagRequested=true
+09-28 16:13:58.444 D/CaloTouchCapture(32425): [1790592238444] state=STATE_DELEGATING
+09-28 16:13:58.491 D/CaloTapTiming(32425): tapId=3 thread=pool-2-thread-1 controllerStateBefore=STATE_TOUCH_INTERACTING queueWaitMs=3.90401 queueDepthAtArrival=1 queueDepthAtStart=1 rootAcquireMs=35.260729 boundsCalls=0 boundsTotalMs=0.0 traversalMs=0.0 semanticCheckMs=0.0 credentialGateMs=0.001823 totalResolutionMs=40.993854 x=865 y=1851 pkg=com.android.systemui gateClear=true onKeyboard=false -> anchor=null
+09-28 16:13:58.492 D/CaloTouchCapture(32425): [1790592238492] state=STATE_CLEAR
+09-28 16:14:18.999 I/Calo    (32425): Dropped SCROLL (no touch-down within 500ms — likely auto-scroll, not user-initiated)
+09-28 16:14:35.140 I/Calo    (32425): Dropped CLICK with no unclaimed finger touch behind it (app-generated, or a second event for one tap): resourceId=null text=null contentDescription=null
+09-28 16:14:35.140 W/Calo    (32425): Low-confidence CLICK anchor (no resourceId/text/contentDescription, className=android.widget.LinearLayout) from real CLICK event
+09-28 16:14:35.315 I/Calo    (32425): Dropped SCROLL (no touch-down within 500ms — likely auto-scroll, not user-initiated)
+09-28 16:16:09.524 D/CaloTouchCapture(32425): [1790592369524] state=STATE_TOUCH_INTERACTING
+09-28 16:16:09.532 D/CaloTapTiming(32425): delegation stateBefore=STATE_TOUCH_INTERACTING stateAfter=STATE_TOUCH_INTERACTING
+09-28 16:16:09.543 D/CaloTouchCapture(32425): [1790592369532] onMotionEvent action=ACTION_DOWN x=970.0 y=649.0 state=STATE_TOUCH_INTERACTING isTouchExplorationEnabled(system)=true ourFlagRequested=true
+09-28 16:16:09.548 D/CaloTouchCapture(32425): [1790592369548] onMotionEvent action=ACTION_MOVE x=970.0 y=649.0 state=STATE_TOUCH_INTERACTING
+09-28 16:16:09.552 D/CaloTouchCapture(32425): [1790592369552] state=STATE_DELEGATING
+09-28 16:16:09.562 D/CaloCredentialGatePerf(32425): CredentialGate.extractSignals: nodeCount=18 walkMs=0.583802
+09-28 16:16:09.583 D/CaloTapTiming(32425): tapId=4 thread=pool-2-thread-1 controllerStateBefore=STATE_TOUCH_INTERACTING queueWaitMs=0.460833 queueDepthAtArrival=1 queueDepthAtStart=1 rootAcquireMs=13.68526 boundsCalls=13 boundsTotalMs=0.051772 traversalMs=0.830365 semanticCheckMs=0.424322 credentialGateMs=21.741615 totalResolutionMs=38.821458 x=970 y=649 pkg=com.oplus.wirelesssettings gateClear=true onKeyboard=false -> anchor=ElementAnchor(resourceId=null, text=Auto-switch to mobile network, contentDescription=null, className=android.widget.LinearLayout, indexInParent=2, hintText=null, contextLabel=null)
+09-28 16:16:09.596 D/CaloTouchCapture(32425): [1790592369596] state=STATE_CLEAR
+09-28 16:16:09.760 W/Calo    (32425): Low-confidence CLICK anchor (no resourceId/text/contentDescription, className=android.widget.LinearLayout) from real CLICK event
+09-28 16:16:16.553 W/Calo    (32425): Dropped CLICK (source null, no cached screen from package "com.oplus.wirelesssettings" within 2000ms — refusing to match across apps/navigations or against stale screens): cls=android.widget.ImageButton
+09-28 16:16:17.159 I/Calo    (32425): Dropped SCROLL (no touch-down within 500ms — likely auto-scroll, not user-initiated)
+09-28 16:16:18.341 I/Calo    (32425): Dropped CLICK with no unclaimed finger touch behind it (app-generated, or a second event for one tap): resourceId=null text=null contentDescription=null
+09-28 16:16:18.342 W/Calo    (32425): Low-confidence CLICK anchor (no resourceId/text/contentDescription, className=android.widget.LinearLayout) from real CLICK event
+09-28 16:16:18.491 I/Calo    (32425): Dropped SCROLL (no touch-down within 500ms — likely auto-scroll, not user-initiated)
+09-28 16:17:09.285 I/CaloTouchCapture(11845): [1790592429285] setServiceInfo: requested=false flags 84 -> 80 isTouchExplorationEnabled(system)=true
+09-28 16:17:09.298 W/Calo    (11845): Resuming a teaching session interrupted by a process restart: 5 step(s) recovered, targetPackage=com.oplus.wirelesssettings
+09-28 16:17:09.390 I/CaloTouchCapture(11845): [1790592429390] setServiceInfo: requested=true flags 80 -> 84 isTouchExplorationEnabled(system)=true
+09-28 16:17:09.396 D/CaloTouchCapture(11845): [1790592429396] registered, initial state=STATE_CLEAR maxPointerCount=32 isTouchExplorationEnabled(system)=true
+09-28 16:17:55.858 I/Calo    (11845): Dropped CLICK with no unclaimed finger touch behind it (app-generated, or a second event for one tap): resourceId=null text=null contentDescription=null
+09-28 16:17:55.858 W/Calo    (11845): Low-confidence CLICK anchor (no resourceId/text/contentDescription, className=android.widget.LinearLayout) from real CLICK event
+09-28 16:20:03.721 W/Calo    (11845): Dropped CLICK (source null, no text or contentDescription segment resolved on any of the 3 cached screens): pkg=com.oplus.wirelesssettings cls=android.widget.LinearLayout
+09-28 16:20:57.735 I/Calo    (11845): Dropped CLICK with no unclaimed finger touch behind it (app-generated, or a second event for one tap): resourceId=null text=null contentDescription=null
+09-28 16:20:57.735 W/Calo    (11845): Low-confidence CLICK anchor (no resourceId/text/contentDescription, className=android.widget.LinearLayout) from real CLICK event
+09-28 16:21:13.936 I/CaloTouchCapture(11845): [1790592673936] setServiceInfo: requested=false flags 84 -> 80 isTouchExplorationEnabled(system)=true
+09-28 16:21:57.548 I/CaloTouchCapture(11845): [1790592717547] setServiceInfo: requested=false flags 80 -> 80 isTouchExplorationEnabled(system)=false
+09-28 16:21:58.780 I/CaloTouchCapture(11845): [1790592718780] setServiceInfo: requested=false flags 80 -> 80 isTouchExplorationEnabled(system)=false
+09-28 16:22:55.679 I/CaloTouchCapture(11845): [1790592775679] setServiceInfo: requested=false flags 80 -> 80 isTouchExplorationEnabled(system)=false
+09-28 16:22:56.803 I/CaloTouchCapture(11845): [1790592776803] setServiceInfo: requested=false flags 80 -> 80 isTouchExplorationEnabled(system)=false

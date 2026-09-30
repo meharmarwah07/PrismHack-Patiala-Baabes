@@ -123,6 +123,32 @@ object RoleMatcher {
      * Anything else is NotFound: tapping an unrelated item is worse than
      * stopping.
      */
+    /**
+     * The exact item picked at teach time (or asked for by slot), if it is on
+     * this screen — null otherwise. Public so replay can wait for it to appear
+     * before settling for a positional guess.
+     *
+     * Cards that carry their name only in contentDescription (Zomato's
+     * restaurant cards) have a null label, so they never reach the positional
+     * candidates; for this lookup alone they are accepted, and label +
+     * contentDescription are searched together.
+     */
+    fun matchTaughtResult(elements: List<ScreenElement>, ctx: RoleContext): ScreenElement? {
+        val expected = RoleKeywords.normalize(ctx.expectedLabel)
+        if (expected.isEmpty()) return null
+        val exact = elements.filter { e ->
+            val c = cuesOf(e)
+            e.clickable && !e.editable &&
+                (!e.label.isNullOrBlank() || !e.contentDescription.isNullOrBlank()) &&
+                !RoleKeywords.isNotAResult(c) && !RoleKeywords.isAddToCart(c) &&
+                !RoleKeywords.isGoToCart(c) && !RoleKeywords.isSearch(c) &&
+                RoleKeywords.normalize("${e.label.orEmpty()} ${e.contentDescription.orEmpty()}").contains(expected)
+        }
+        return exact.minWithOrNull(
+            compareBy<ScreenElement> { (it.label ?: it.contentDescription)?.length ?: 0 }.thenBy { it.id }
+        )
+    }
+
     private fun matchResult(elements: List<ScreenElement>, ctx: RoleContext): RoleMatch {
         val candidates = elements.filter { e ->
             val c = cuesOf(e)
@@ -131,13 +157,7 @@ object RoleMatcher {
                 !RoleKeywords.isGoToCart(c) && !RoleKeywords.isSearch(c)
         }
 
-        val expected = RoleKeywords.normalize(ctx.expectedLabel)
-        if (expected.isNotEmpty()) {
-            val exact = candidates.filter { RoleKeywords.normalize(it.label).contains(expected) }
-            if (exact.isNotEmpty()) {
-                return RoleMatch.Found(exact.minWith(compareBy<ScreenElement> { it.label?.length ?: 0 }.thenBy { it.id }))
-            }
-        }
+        matchTaughtResult(elements, ctx)?.let { return RoleMatch.Found(it) }
 
         val index = ctx.index.coerceAtLeast(1)
         val listItems = candidates.filter { it.inList }.sortedBy { it.id }

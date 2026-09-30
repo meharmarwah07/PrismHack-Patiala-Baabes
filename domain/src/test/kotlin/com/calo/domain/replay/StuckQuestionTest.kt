@@ -25,6 +25,24 @@ class StuckQuestionTest {
     }
 
     @Test
+    fun `verbose zomato card description is cut down to the restaurant name`() {
+        val anchor = ElementAnchor(
+            contentDescription = "Restaurant Name is Bake By Ecco ₹100 OFF above ₹199 delivers in 24 minutesSwipe up or down for more actions"
+        )
+        assertEquals(
+            "I couldn't find 'Bake By Ecco' on this screen. Should I pick something else, or stop?",
+            StuckQuestion.build(anchor, stepOrder = 4)
+        )
+    }
+
+    @Test
+    fun `long description with no extractable name is truncated`() {
+        val anchor = ElementAnchor(contentDescription = "7".repeat(200))
+        val q = StuckQuestion.build(anchor, stepOrder = 4)
+        assertEquals("I couldn't find '${"7".repeat(60)}' on this screen. Should I pick something else, or stop?", q)
+    }
+
+    @Test
     fun `falls back to contentDescription when text is blank`() {
         val anchor = ElementAnchor(text = "  ", contentDescription = "Confirm order")
         assertEquals(

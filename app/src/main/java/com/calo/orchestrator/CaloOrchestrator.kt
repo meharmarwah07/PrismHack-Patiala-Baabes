@@ -33,6 +33,9 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.runInterruptible
+import kotlinx.coroutines.withTimeout
 import kotlin.coroutines.resume
 
 /**
@@ -45,6 +48,25 @@ typealias ConfirmPrompt = (question: String, answer: (Boolean) -> Unit) -> Unit
 class CaloOrchestrator(context: Context) {
 
     private companion object {
+        const val AI_HELPER_ENABLED = false
+
+        // Safety net added submission night (2026-09-30): ReplayEngine.replay
+        // is a plain blocking call (Thread.sleep-based settle polling + raw
+        // AccessibilityNodeInfo tree walks) with NO per-step timeout of its
+        // own. STEP_TIMEOUT_MS/withStepTimeout exist only on ReplayPlanner
+        // (:domain) -- confirmed tonight that class is never constructed
+        // anywhere in the app, so it bounds nothing at runtime. Confirmed
+        // on-device: a node-tree walk right after "Screen still changing...
+        // continuing anyway" hung indefinitely -- zero further log output,
+        // no ANR (not a main-thread/system-level freeze, just a wedged
+        // background coroutine). This does NOT fix why the walk stalls
+        // (most likely: walking a tree Zomato is still actively re-rendering)
+        // -- it only guarantees a hang degrades to a spoken "stopped, not sure
+        // what happened" instead of hanging forever. Generous on purpose:
+        // observed legitimate multi-step runs (settle waits + CredentialGate
+        // walks) comfortably run past 30s.
+        const val REPLAY_WATCHDOG_MS = 90_000L
+
         // Below this, the AI's pick is confirmed with the user before
         // anything is tapped. The parser reports 0.0 when the reply had no
         // confidence at all, so a missing value also asks. Superseded in
@@ -297,6 +319,36 @@ class CaloOrchestrator(context: Context) {
         }
     }
 
+    /**
+     * Runs [ReplayEngine.replay] (a blocking call -- see REPLAY_WATCHDOG_MS)
+     * off the main thread with a hard ceiling. runInterruptible sends a
+     * thread interrupt on timeout, which the engine's Thread.sleep-based
+     * settle polling will observe promptly; a raw AccessibilityNodeInfo/
+     * binder call mid-flight may or may not honor the interrupt, so this
+     * bounds the wait, it doesn't guarantee the underlying call itself
+     * stops running. On timeout, actionMayHaveExecuted=true forces the
+     * existing "don't retry, just say so" path in handleReplayResult --
+     * correct here since we genuinely don't know what step it froze on
+     * or whether an action already landed.
+     */
+    private suspend fun replayWithWatchdog(
+        engine: ReplayEngine,
+        steps: List<FlowStep>,
+        slotValues: Map<String, String>,
+        mode: ReplayMode = ReplayMode.EXACT
+    ): ReplayResult = try {
+        withTimeout(REPLAY_WATCHDOG_MS) {
+            runInterruptible(Dispatchers.Default) { engine.replay(steps, slotValues, mode) }
+        }
+    } catch (e: TimeoutCancellationException) {
+        android.util.Log.w("Calo", "Replay watchdog: engine.replay didn't return within ${REPLAY_WATCHDOG_MS}ms -- forcing a safe stop")
+        ReplayResult.Stuck(
+            atStepOrder = steps.lastOrNull()?.order ?: 0,
+            reason = "replay watchdog timed out after ${REPLAY_WATCHDOG_MS}ms -- unknown state",
+            actionMayHaveExecuted = true
+        )
+    }
+
     private suspend fun launchAndReplay(
         service: CaloAccessibilityService,
         flow: LearnedFlow,
@@ -344,7 +396,7 @@ class CaloOrchestrator(context: Context) {
         repository.recordUsage(flow.id)
 
         val engine = ReplayEngine(service)
-        val result = withContext(Dispatchers.Default) { engine.replay(steps, slotValues, mode) }
+        val result = replayWithWatchdog(engine, steps, slotValues, mode)
         handleReplayResult(
             engine, steps, slotValues, result, onStatus, mode = mode,
             flow = flow, spokenCommand = spokenCommand, targetPackage = targetPackage
@@ -411,7 +463,11 @@ class CaloOrchestrator(context: Context) {
             return
         }
 
-        if (agentEligible && flow != null && spokenCommand != null && targetPackage != null) {
+        // Off for submission (2026-09-30): on-device the helper ended in a false "done", Groq
+        // 429/400/truncation, or a wandering scroll in every run observed, and a wrong tap
+        // it made left the app further off course. A stuck step goes straight to the spoken
+        // question below instead. Flip to true to re-enable.
+        if (AI_HELPER_ENABLED && agentEligible && flow != null && spokenCommand != null && targetPackage != null) {
             onStatus("Step ${result.atStepOrder} didn't match — letting AI finish it...")
             val task = AgentTaskBuilder.from(
                 spokenCommand = spokenCommand,
@@ -458,7 +514,7 @@ class CaloOrchestrator(context: Context) {
                 val retrySlotValues = slotValues + (retrySlotName to action.newValue)
 
                 onStatus("Trying \"${action.newValue}\" instead...")
-                val retryResult = engine.replay(retrySteps, retrySlotValues, mode)
+                val retryResult = replayWithWatchdog(engine, retrySteps, retrySlotValues, mode)
                 handleReplayResult(
                     engine, retrySteps, retrySlotValues, retryResult, onStatus, attempt = 1, mode = mode,
                     flow = flow, spokenCommand = spokenCommand, targetPackage = targetPackage, agentEligible = false
@@ -716,7 +772,7 @@ class CaloOrchestrator(context: Context) {
             }
             onStatus("Replaying (debug, no NLU): ${latest.description}")
             val engine = ReplayEngine(service)
-            val result = withContext(Dispatchers.Default) { engine.replay(RoleLabeler.relabel(latest.steps), emptyMap()) }
+            val result = replayWithWatchdog(engine, RoleLabeler.relabel(latest.steps), emptyMap())
             announceResult(describeResult(result), onStatus)
         }
     }

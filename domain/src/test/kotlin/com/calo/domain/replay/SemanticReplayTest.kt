@@ -37,9 +37,26 @@ private class FakeScreen(
     override fun findNodeByValue(value: String): NodeHandle? =
         elements.firstOrNull { it.label == value }?.let { Handle("el:${it.id}") }
 
+    // Simulates a page that fills in over time: from read number
+    // [laterElementsAfterReads] + 1 onward, [laterElements] is served instead.
+    var laterElements: List<ScreenElement>? = null
+    var laterElementsAfterReads = 0
+
+    // Simulates a row that is only in the tree once the list has been scrolled down.
+    var elementsAfterScroll: List<ScreenElement>? = null
+    var scrollPosition = 0
+
     override fun screenElements(): List<ScreenElement> {
         elementReads++
-        return elements
+        elementsAfterScroll?.let { if (scrollPosition > 0) return it }
+        val later = laterElements
+        return if (later != null && elementReads > laterElementsAfterReads) later else elements
+    }
+
+    override fun scrollScreen(forward: Boolean): Boolean {
+        scrollPosition += if (forward) 1 else -1
+        actions += if (forward) "scrollScreen down" else "scrollScreen up"
+        return true
     }
 
     override fun nodeForElement(element: ScreenElement): NodeHandle = Handle("el:${element.id}")
@@ -125,6 +142,66 @@ class SemanticReplayTest {
         ReplayPlanner.replay(amazonFlow, mapOf("query" to "running shoes"), screen, ReplayMode.SEMANTIC)
         assertTrue(screen.actions.contains("type el:1=running shoes"))
         assertTrue(screen.actions.contains("click el:9"))
+    }
+
+    // 2026-09-30 Zomato: results page filled in over several seconds; the first snapshot had
+    // only the "Cake | See all restaurants" header, and replay tapped it instead of waiting for
+    // the taught restaurant card.
+    @Test
+    fun `taught result that appears late is waited for, not replaced by a positional guess`() {
+        val taught = FlowStep(
+            1, ActionType.CLICK,
+            ElementAnchor(
+                contentDescription = "Restaurant Name is Bake By Ecco ₹100 OFF above ₹199 delivers in 25 minutesSwipe up or down for more actions"
+            ),
+            role = com.calo.domain.semantic.SemanticRole.SELECT_RESULT
+        )
+        val header = ScreenElement(3, label = "Cake | See all restaurants |", clickable = true, inList = true)
+        val card = ScreenElement(
+            4, contentDescription = taught.target.contentDescription, clickable = true, inList = true
+        )
+        val screen = FakeScreen(elements = listOf(header)).also {
+            it.laterElements = listOf(header, card)
+            it.laterElementsAfterReads = 2
+        }
+
+        val result = ReplayPlanner.replay(listOf(taught), emptyMap(), screen, ReplayMode.EXACT)
+
+        assertEquals(ReplayResult.Completed, result)
+        assertEquals(listOf("click el:4"), screen.actions)
+    }
+
+    private fun bakeByEccoStep() = FlowStep(
+        1, ActionType.CLICK,
+        ElementAnchor(
+            contentDescription = "Restaurant Name is Bake By Ecco ₹100 OFF above ₹199 delivers in 25 minutesSwipe up or down for more actions"
+        ),
+        role = com.calo.domain.semantic.SemanticRole.SELECT_RESULT
+    )
+
+    @Test
+    fun `taught result below the fold is found by scrolling`() {
+        val taught = bakeByEccoStep()
+        val header = ScreenElement(3, label = "Cake | See all restaurants |", clickable = true, inList = true)
+        val card = ScreenElement(4, contentDescription = taught.target.contentDescription, clickable = true, inList = true)
+        val screen = FakeScreen(elements = listOf(header)).also { it.elementsAfterScroll = listOf(header, card) }
+
+        val result = ReplayPlanner.replay(listOf(taught), emptyMap(), screen, ReplayMode.EXACT)
+
+        assertEquals(ReplayResult.Completed, result)
+        assertEquals(listOf("scrollScreen down", "click el:4"), screen.actions)
+    }
+
+    @Test
+    fun `taught result that never appears is scrolled back before the positional fallback`() {
+        val taught = bakeByEccoStep()
+        val header = ScreenElement(3, label = "Cake | See all restaurants |", clickable = true, inList = true)
+        val screen = FakeScreen(elements = listOf(header))
+
+        ReplayPlanner.replay(listOf(taught), emptyMap(), screen, ReplayMode.EXACT)
+
+        assertEquals(0, screen.scrollPosition) // every scroll down was undone
+        assertTrue(screen.actions.count { it == "scrollScreen down" } in 1..4)
     }
 
     @Test
