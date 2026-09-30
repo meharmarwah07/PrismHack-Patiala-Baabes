@@ -5,6 +5,7 @@ import android.content.Intent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.calo.accessibility.CaloAccessibilityService
 import com.calo.data.FlowRepository
+import com.calo.data.LastRunStore
 import com.calo.data.LearnedFlow
 import com.calo.domain.agent.AgentTaskBuilder
 import com.calo.domain.model.ElementAnchor
@@ -99,6 +100,7 @@ class CaloOrchestrator(context: Context) {
     private val voice = VoiceInputManager(appContext)
     private val tts = TextToSpeechManager(appContext)
     private val repository = FlowRepository(appContext)
+    private val lastRunStore = LastRunStore(appContext)
     private val nluClient = NLUClient()
 
     private val job = SupervisorJob()
@@ -476,16 +478,19 @@ class CaloOrchestrator(context: Context) {
             // Spoken sentence stays short and free of resourceIds; the technical
             // detail goes to the UI status and logcat only.
             android.util.Log.i("Calo", "Replay halted by credential gate at step ${result.atStepOrder}: ${result.reason}")
+            recordOutcome(flow, spokenCommand, result)
             onStatus(describeResult(result))
             tts.speak("This screen is asking for something private, so I'm stopping here and handing control back to you. Your turn — I won't tap anything on this screen.")
             return
         }
         if (result !is ReplayResult.Stuck) {
+            recordOutcome(flow, spokenCommand, result)
             onStatus(describeResult(result))
             return
         }
 
         if (result.actionMayHaveExecuted) {
+            recordOutcome(flow, spokenCommand, result)
             val message = "Stopped — the last action may not have completed cleanly, so I'm not retrying automatically."
             onStatus(message)
             tts.speak(message)
@@ -525,7 +530,10 @@ class CaloOrchestrator(context: Context) {
 
         val outcome = listenForStuckAnswer()
         when (val action = StuckAnswerHandler.handle(outcome, attempt)) {
-            StuckAction.Stop -> onStatus("Stopped.")
+            StuckAction.Stop -> {
+                recordOutcome(flow, spokenCommand, result)
+                onStatus("Stopped.")
+            }
             StuckAction.Repeat -> handleReplayResult(
                 engine, steps, slotValues, result, onStatus, attempt = attempt + 1, mode = mode,
                 flow = flow, spokenCommand = spokenCommand, targetPackage = targetPackage, agentEligible = false
@@ -548,8 +556,16 @@ class CaloOrchestrator(context: Context) {
                     engine, retrySteps, retrySlotValues, retryResult, onStatus, attempt = 1, mode = mode,
                     flow = flow, spokenCommand = spokenCommand, targetPackage = targetPackage, agentEligible = false
                 )
+                // No record() here: the nested call above records its own terminal
+                // outcome. Recording retryResult again would overwrite a later,
+                // correct outcome (e.g. a second voice retry that completed).
             }
         }
+    }
+
+    /** Persists the same string describeResult() shows/speaks, so "last run" can't disagree with it. */
+    private fun recordOutcome(flow: LearnedFlow?, spokenCommand: String?, result: ReplayResult) {
+        lastRunStore.record(flow?.description ?: spokenCommand.orEmpty(), describeResult(result))
     }
 
     private suspend fun listenForStuckAnswer(): StuckAnswerHandler.VoiceOutcome =
