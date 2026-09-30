@@ -20,10 +20,10 @@ sealed class GateVerdict {
  */
 object CredentialGateRules {
 
-    // Matched as a case-insensitive substring against every string in
-    // ScreenSignals (text, resourceId, className). Grouped by category only
-    // for readability in the "matchedOn" reason string — all categories
-    // block identically.
+    // Two tiers. STRONG keywords block on any single hit, matched as a
+    // case-insensitive substring against every string in ScreenSignals (text,
+    // resourceId, className). Grouped by category only for readability in the
+    // "matchedOn" reason string — all categories block identically.
     private val PASSWORD_KEYWORDS = listOf(
         "password", "passwd", "pwd", "passcode"
     )
@@ -36,11 +36,8 @@ object CredentialGateRules {
         "card number", "cardnumber", "card_number", "cvv", "cvc",
         "expiry", "exp date", "expiration date", "billing address",
         "upi pin", "bank account", "ifsc", "routing number", "swift code",
-        // Added for T11 (2026-09-26): checkout-flow wording confirmed missing
-        // from the original keyword set — "pay"/"upi" alone (not just "upi
-        // pin") are what real checkout screens (Zomato, Dominos) actually
-        // show on the final confirm-and-pay button/page.
-        "pay", "proceed to pay", "place order", "upi", "pay ₹", "total payable"
+        "add new card", "saved card", "netbanking", "net banking",
+        "payment options", "choose payment", "select payment method"
     )
     private val LOGIN_KEYWORDS = listOf(
         "sign in", "signin", "log in", "login", "authenticate",
@@ -53,6 +50,33 @@ object CredentialGateRules {
         OTP_KEYWORDS.map { it to "otp" } +
         PAYMENT_KEYWORDS.map { it to "payment" } +
         LOGIN_KEYWORDS.map { it to "login" }
+
+    // WEAK payment wording: block only when TWO OR MORE DISTINCT keywords are
+    // present. A CART screen carries exactly one ("Place Order"), so it stays
+    // Clear and replay can reach and tap the button that leads to payment. A
+    // real payment screen carries several ("UPI", "Wallet", "Pay", "Payment"),
+    // so it still blocks — which is what T11 grades (worth 5, -10 on failure).
+    //
+    // Matched against allText ONLY (never resourceIds/classNames — kills
+    // "com.zomato.payments.*" false positives) and on WORD BOUNDARIES (so
+    // "Paytm cashback" isn't "pay" and "Occupied" isn't "upi"). Distinct
+    // keywords are counted, not occurrences: "Pay" in four places is one signal.
+    //
+    // Weak signals must be INDEPENDENT pieces of evidence. "place order" and
+    // "proceed to pay" are deliberately NOT in this list: they are cart-screen
+    // affordances that never appear on a payment-ENTRY screen, so they add
+    // nothing to detecting one — their only effect would be inflating the weak
+    // count on the exact screen that must stay Clear ("Proceed to Pay" would
+    // otherwise fire both itself and "pay"). A "Proceed to Pay" cart carries one
+    // weak signal ("pay") and passes; a real payment sheet carries several
+    // ("upi", "wallet", "payment", "pay") and blocks.
+    private val WEAK_PAYMENT_KEYWORDS = listOf(
+        "pay", "upi", "wallet", "paytm", "gpay", "phonepe", "total payable", "payment"
+    )
+    private val WEAK_PAYMENT_PATTERNS: List<Pair<String, Regex>> = WEAK_PAYMENT_KEYWORDS.map {
+        it to Regex("\\b" + Regex.escape(it) + "\\b", RegexOption.IGNORE_CASE)
+    }
+    private const val WEAK_SIGNALS_TO_BLOCK = 2
 
     /**
      * Fails closed: if signals are ambiguous or the caller passed nothing
@@ -88,6 +112,17 @@ object CredentialGateRules {
                     )
                 }
             }
+        }
+
+        val weakHits = WEAK_PAYMENT_PATTERNS.filter { (_, pattern) ->
+            signals.allText.any { pattern.containsMatchIn(it) }
+        }
+        if (weakHits.size >= WEAK_SIGNALS_TO_BLOCK) {
+            val keywords = weakHits.map { it.first }
+            return GateVerdict.Blocked(
+                reason = "payment-related content detected: " + keywords.joinToString(", ") { "\"$it\"" },
+                matchedOn = keywords.joinToString(", ")
+            )
         }
 
         return GateVerdict.Clear

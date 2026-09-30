@@ -48,36 +48,100 @@ class CredentialGateRulesTest {
         assertTrue(verdict is GateVerdict.Blocked)
     }
 
-    // --- T11 checkout-wording keywords (2026-09-26) --------------------
+    // --- T11 checkout-wording: two-tier scheme ---------------------------
+    // A single weak keyword (Pay / Place order / Total payable) is what the
+    // CART screen shows and must stay Clear; several together mean a real
+    // payment screen and must block.
 
     @Test
-    fun `blocks on a bare Pay button`() {
-        assertTrue(CredentialGateRules.classify(clear("Pay", "₹450")) is GateVerdict.Blocked)
+    fun `cart screen with Proceed to Pay stays clear so replay can reach payment`() {
+        val verdict = CredentialGateRules.classify(clear("Your cart", "Margherita Pizza", "449", "Proceed to Pay"))
+        assertEquals(GateVerdict.Clear, verdict)
     }
 
     @Test
-    fun `blocks on Proceed to pay`() {
-        assertTrue(CredentialGateRules.classify(clear("Proceed to pay")) is GateVerdict.Blocked)
-    }
-
-    @Test
-    fun `blocks on Place order`() {
-        assertTrue(CredentialGateRules.classify(clear("Place order")) is GateVerdict.Blocked)
-    }
-
-    @Test
-    fun `blocks on UPI (not just UPI PIN)`() {
+    fun `blocks on Pay via UPI`() {
         assertTrue(CredentialGateRules.classify(clear("Pay via UPI")) is GateVerdict.Blocked)
     }
 
     @Test
-    fun `blocks on a rupee-denominated pay amount`() {
-        assertTrue(CredentialGateRules.classify(clear("Pay ₹450")) is GateVerdict.Blocked)
+    fun `a single weak keyword alone does not block`() {
+        assertEquals(GateVerdict.Clear, CredentialGateRules.classify(clear("Pay", "₹450")))
+        assertEquals(GateVerdict.Clear, CredentialGateRules.classify(clear("Place order")))
+        assertEquals(GateVerdict.Clear, CredentialGateRules.classify(clear("Proceed to pay")))
+        assertEquals(GateVerdict.Clear, CredentialGateRules.classify(clear("Pay ₹450")))
+        assertEquals(GateVerdict.Clear, CredentialGateRules.classify(clear("Total payable: ₹450")))
     }
 
     @Test
-    fun `blocks on Total payable`() {
-        assertTrue(CredentialGateRules.classify(clear("Total payable: ₹450")) is GateVerdict.Blocked)
+    fun `cart screen with Place Order stays clear so replay can reach payment`() {
+        val verdict = CredentialGateRules.classify(clear("Your cart", "Margherita Pizza", "449", "Place Order"))
+        assertEquals(GateVerdict.Clear, verdict)
+    }
+
+    @Test
+    fun `payment screen with several weak signals blocks and names them`() {
+        val verdict = CredentialGateRules.classify(clear("Payment Options", "UPI", "Wallet", "Pay 449"))
+        assertTrue(verdict is GateVerdict.Blocked)
+        val reason = (verdict as GateVerdict.Blocked).reason
+        // "Payment Options" is also a strong keyword, so it may fire on that path
+        // first; either way the verdict is Blocked. Weak-path wording is asserted below.
+        assertTrue(reason.contains("payment"))
+    }
+
+    @Test
+    fun `weak path reason lists every distinct weak keyword that fired`() {
+        val verdict = CredentialGateRules.classify(clear("UPI", "Wallet", "Pay 449")) as GateVerdict.Blocked
+        assertTrue(verdict.reason.startsWith("payment-related content detected:"))
+        for (kw in listOf("upi", "wallet", "pay")) {
+            assertTrue("reason should name $kw: ${verdict.reason}", verdict.reason.contains("\"$kw\""))
+        }
+        assertTrue(verdict.matchedOn.isNotBlank())
+    }
+
+    @Test
+    fun `weak keywords are counted distinct not by occurrence`() {
+        val verdict = CredentialGateRules.classify(clear("Pay", "Pay now", "Pay later", "Pay 449"))
+        assertEquals(GateVerdict.Clear, verdict)
+    }
+
+    @Test
+    fun `payment screen with only a card field blocks via the strong path`() {
+        assertTrue(CredentialGateRules.classify(clear("Card number", "CVV")) is GateVerdict.Blocked)
+    }
+
+    @Test
+    fun `new strong payment keywords block on their own`() {
+        for (text in listOf("Add new card", "Saved card", "Netbanking", "Net banking",
+            "Choose payment", "Select payment method")) {
+            assertTrue(text, CredentialGateRules.classify(clear(text)) is GateVerdict.Blocked)
+        }
+    }
+
+    @Test
+    fun `payments class name on a home screen does not block`() {
+        val signals = ScreenSignals(
+            packageName = "com.zomato",
+            allText = listOf("Delivery", "Dining"),
+            classNames = listOf("com.zomato.payments.PayButton")
+        )
+        assertEquals(GateVerdict.Clear, CredentialGateRules.classify(signals))
+    }
+
+    @Test
+    fun `weak keywords in resource ids do not count`() {
+        val signals = clear("Home", resourceIds = listOf("com.zomato:id/pay_upi_wallet_payment"))
+        assertEquals(GateVerdict.Clear, CredentialGateRules.classify(signals))
+    }
+
+    @Test
+    fun `Paytm cashback offer alone does not block`() {
+        assertEquals(GateVerdict.Clear, CredentialGateRules.classify(clear("Paytm cashback offer")))
+    }
+
+    @Test
+    fun `Occupied does not substring-match upi`() {
+        assertEquals(GateVerdict.Clear, CredentialGateRules.classify(clear("Occupied")))
     }
 
     @Test
