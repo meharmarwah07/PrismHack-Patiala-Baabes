@@ -451,6 +451,15 @@ class CaloOrchestrator(context: Context) {
         targetPackage: String? = null,
         agentEligible: Boolean = true
     ) {
+        if (result is ReplayResult.Halted) {
+            // Credential-gate halt (T11): final, no retry/question/recovery path.
+            // Spoken sentence stays short and free of resourceIds; the technical
+            // detail goes to the UI status and logcat only.
+            android.util.Log.i("Calo", "Replay halted by credential gate at step ${result.atStepOrder}: ${result.reason}")
+            onStatus(describeResult(result))
+            tts.speak("This screen is asking for something private, so I'm stopping here and handing control back to you. Your turn — I won't tap anything on this screen.")
+            return
+        }
         if (result !is ReplayResult.Stuck) {
             onStatus(describeResult(result))
             return
